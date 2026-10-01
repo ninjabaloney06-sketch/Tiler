@@ -34,7 +34,8 @@ import TilerTestSupport
 //   5. the footer "Tiler Settings…" opens Settings (closed again via AX);
 //   5b. the same footer row from the hotkey palette (panel key, Tiler not active beforehand)
 //      also activates Tiler, with Settings frontmost of TW1 — not just present;
-//   6a. a right click on the status item with the palette open switches to the classic menu;
+//   6a. a right click on the status item with the palette open switches to the classic menu; Esc
+//      posted to Tiler's pid closes it (dismissal read off the pop-up-menu CG window + AX item);
 //   6. pause via the classic menu (opened over an open palette): the hotkey does nothing and a
 //      left click shows the menu; resumed, the hotkey works again;
 //   status item pill (screencapture of its rect vs. its unhighlighted baseline): shown while the
@@ -160,6 +161,21 @@ func pressKey(_ code: CGKeyCode, flags: CGEventFlags = [], allowed: pid_t? = nil
         guard let event = CGEvent(keyboardEventSource: eventSource, virtualKey: code, keyDown: down) else { continue }
         event.flags = flags
         event.post(tap: .cghidEventTap)
+        pause(0.02)
+    }
+    pause(0.05)
+    return true
+}
+
+/// Posts a key press directly to `target`'s process (`CGEvent.postToPid`), not through the global
+/// HID tap. Used where an app is still inside synthetic mouse-down tracking — the classic status
+/// menu in 6a is opened by a synthetic click and tracks while the test posts the key — where a
+/// HID-tap key races the tracking loop instead of cancelling it.
+func pressKeyToPid(_ code: CGKeyCode, flags: CGEventFlags = [], to target: pid_t) -> Bool {
+    for down in [true, false] {
+        guard let event = CGEvent(keyboardEventSource: eventSource, virtualKey: code, keyDown: down) else { continue }
+        event.flags = flags
+        event.postToPid(target)
         pause(0.02)
     }
     pause(0.05)
@@ -1306,7 +1322,11 @@ func openStatusMenu(right: Bool) -> AXUIElement? {
 
 // 6a. Right-clicking the status item while the palette is open switches to the classic menu: the
 // palette closes, and once the menu is closed again the pill is gone. (`paletteVisible`, not
-// `paletteClosed`: the classic menu is itself a Tiler window at the pop-up menu level.)
+// `paletteClosed`: the classic menu is itself a Tiler window at the pop-up menu level.) The Esc
+// goes straight to the test Tiler (`pressKeyToPid`) and dismissal is read off the pop-up-menu CG
+// window: the old HID-tap Esc raced the menu's synthetic tracking, and the old AX-item wait could
+// never fire because the item sits in the AX tree permanently (check bugs, not app bugs —
+// new-repo issue #3).
 do {
     if frontmostPID() != helperPID { _ = raiseHelper() }
     if clickStatusItem() != nil, readPalette() != nil {
@@ -1315,8 +1335,12 @@ do {
             let closed = waitFor(0.6) { !paletteVisible() }
             check("6a right-click switches to the classic menu", closed != nil, "palette still visible with the menu open",
                   note: ms(closed))
-            _ = pressKey(Key.escape)
-            let menuClosed = waitFor(1.5) { statusMenuItem("Pause Tiler") == nil }
+            _ = pressKeyToPid(Key.escape, to: tilerPID)
+            // Dismissal reads off the pop-up-menu CG window: the classic menu is Tiler's window at
+            // that level and leaves the on-screen list exactly when it closes. The AX item is NOT
+            // a signal — StatusMenu exposes "Pause Tiler" in the AX tree permanently (verified
+            // against the installed app), so a `statusMenuItem == nil` wait could never fire.
+            let menuClosed = waitFor(2.0) { paletteWindow() == nil }
             check("6a Esc closes the classic menu", menuClosed != nil, "menu still open")
             checkHighlight("6a after the classic menu:", on: false)
         } else {

@@ -18,11 +18,15 @@ import func TilerTestSupport.screenIsLocked
 //      Geometry; left/right edges exactly on visibleFrame.minX (+ inset) / maxX), TW2 and TW3
 //      (re-align rule), each followed by Revert (≤ 1 pt back to the start frame); TW1 frames of
 //      neighbouring presets of one variant touch (no gaps);
-//   2. every arrange preset (both variants) with k−1, k and k+1 visible windows (k = slots):
+//   2. every arrange preset (both variants) with k−1, k and k+1 visible windows (k = slots), and
+//      additionally with exactly 1 and exactly 2 visible windows whenever k > 2 (for k ≤ 2 those
+//      coincide with the k−1 / k scenarios):
 //      windows are first placed near shuffled slots; the harness checks each landed in its
 //      nearest slot (cost of SPEC §1 step 4), that the hovered TW1 is always kept, that windows
-//      beyond k stay untouched, that neighbouring slots / windows share edges exactly and the
-//      rightmost end at visibleFrame.maxX, and that Revert of the arrange restores every frame;
+//      beyond the visible ones stay untouched, that neighbouring slots / windows share edges
+//      exactly and the rightmost end at visibleFrame.maxX, and that Revert of the arrange
+//      restores every frame; with exactly 2 windows the two land in different slots at the
+//      pairing with the least total cost (brute-forced here from the 2×2 cost matrix);
 //      Revert also after windows were ordered out and in again ("show 0" → "show N", which
 //      replaces their AX elements): one window, a whole arrange, and an arrange with one window
 //      still ordered out (it keeps its history and is restored by a second Revert once shown);
@@ -727,6 +731,30 @@ func runArrange(_ preset: Preset, visibleCount: Int, withTarget: Bool = true) {
         let reportedSlot = result.moves.first { $0.windowID == window.windowID }?.slotIndex
         if reportedSlot != slot { problems.append("\(window.name) engine slot \(reportedSlot.map(String.init) ?? "none") != \(slot)") }
     }
+    // Exactly 2 windows: brute-force the 2×2 cost matrix (cost() above) over all ordered slot
+    // pairs and compare with the engine's assignment — the two windows must go to two different
+    // slots, at the pairing with the least total cost. The setup precondition (each window's
+    // nearest slot by a margin > 1) makes that optimum unique, so a tie cannot mislead here.
+    if keptCount == 2 {
+        let pairingCosts = kept.map { window in slots.map { cost(before[window.number]!, $0) } }
+        var optimum: (first: Int, second: Int)?
+        var optimumTotal = CGFloat.infinity
+        for first in slots.indices {
+            for second in slots.indices where first != second {
+                let total = pairingCosts[0][first] + pairingCosts[1][second]
+                if total < optimumTotal { optimumTotal = total; optimum = (first, second) }
+            }
+        }
+        let engineSlots = kept.map { window in result.moves.first { $0.windowID == window.windowID }?.slotIndex }
+        if let optimum {
+            if engineSlots != [optimum.first, optimum.second] {
+                problems.append("engine pairing \(engineSlots.map { $0.map(String.init) ?? "none" }.joined(separator: " + "))"
+                                + " != least-cost pairing \(optimum.first) + \(optimum.second)")
+            }
+        } else {
+            problems.append("no two-slot pairing among \(slots.count) slots")
+        }
+    }
     // Actual windows in neighbouring slots touch (resizable ones; constrained ones may overlap).
     let resizableKept = kept.filter { if case .none = $0.constraint { true } else { false } }
     problems += touching(resizableKept.map { preset.slots[intended[$0.number]!] }, resizableKept.map(frame),
@@ -735,6 +763,24 @@ func runArrange(_ preset: Preset, visibleCount: Int, withTarget: Bool = true) {
         problems.append("\(window.name) should be untouched but moved")
     }
     problems += settle(visibleWindows)
+    // Windows ordered out stay out: the engine only ever acts on on-stage candidates, so exactly
+    // the visible windows may be on screen after the arrange. (Polled briefly, like settle: a
+    // window that `show n` just ordered out can still be listed while the window server finishes
+    // tearing it down; if one really comes back, the poll ends and the row names it.)
+    let countDeadline = Date().addingTimeInterval(1.5)
+    var onScreenProblems: [String] = []
+    repeat {
+        let onScreen = Set(cgWindows().filter { $0.pid == testPID && $0.layer == 0 }.map(\.id))
+        let beyond = onScreen.subtracting(visibleWindows.map(\.windowID)).sorted()
+        let missing = visibleWindows.filter { !onScreen.contains($0.windowID) }.map(\.name)
+        onScreenProblems = beyond.map { id in
+            let name = testWindows.first { $0.windowID == id }?.name ?? "helper window #\(id)"
+            return "\(name) on screen beyond the \(visibleCount) visible"
+        } + missing.map { "\($0) not on screen" }
+        if onScreenProblems.isEmpty { break }
+        Thread.sleep(forTimeInterval: 0.05)
+    } while Date() < countDeadline
+    problems += onScreenProblems
     if !engine.hasArrangeHistory { problems.append("no arrange history") }
 
     let restored = engine.revertLastArrange()
@@ -755,8 +801,15 @@ func runArrange(_ preset: Preset, visibleCount: Int, withTarget: Bool = true) {
 
 for preset in PresetLibrary.all where preset.kind == .arrange {
     let slotCount = preset.slots.count
-    for visibleCount in [slotCount - 1, slotCount, slotCount + 1] where (1...windowCount).contains(visibleCount) {
-        runArrange(preset, visibleCount: visibleCount)
+    // Fewer-windows-than-slots coverage: every arrange preset is additionally applied with
+    // exactly 1 and exactly 2 visible windows. For k ≤ 2 those coincide with the k−1 / k
+    // scenarios above, so they are added for k > 2 only (deduplicated, so a k = 3 preset where
+    // 2 = k−1 would not run twice either).
+    var counts = [slotCount - 1, slotCount, slotCount + 1]
+    if slotCount > 2 { counts += [1, 2] }
+    var ran = Set<Int>()
+    for visibleCount in counts where (1...windowCount).contains(visibleCount) {
+        if ran.insert(visibleCount).inserted { runArrange(preset, visibleCount: visibleCount) }
     }
 }
 

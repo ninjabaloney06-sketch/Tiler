@@ -32,8 +32,14 @@ public enum Assignment {
     ///   - area: the usable area of the hovered window's screen.
     /// - Returns: one move per kept window, in kept order (hovered first). With more windows than
     ///   slots only the first `slots.count` windows (most recently used) are kept; the others do
-    ///   not appear and stay untouched. With fewer windows, the extra slots stay empty. The
-    ///   window ↔ slot pairing minimizes the summed `cost`.
+    ///   not appear and stay untouched. With fewer windows, the extra slots stay empty.
+    ///
+    /// The hovered window always takes the PRIMARY slot (slot index 0 — the left full-height slot
+    /// of the split layouts, the top-left cell of grids), whatever its position or size, matching
+    /// macOS's green-button menu where the target window lands in the main position (ninja,
+    /// 1 Oct 2026; pure min-cost sent a hovered mid-size window to a small right slot). The
+    /// remaining kept windows minimize the summed `cost` over the remaining slots. Without a
+    /// hovered window the pairing of all kept windows minimizes the summed `cost`.
     public static func planArrange(
         windowFrames: [CGRect], hoveredIndex: Int?, preset: Preset, area: UsableArea
     ) -> [ArrangeMove] {
@@ -42,13 +48,29 @@ public enum Assignment {
 
         // Step 2: front-to-back, hovered window first.
         var order = Array(windowFrames.indices)
-        if let hovered = hoveredIndex, windowFrames.indices.contains(hovered) {
-            order.remove(at: hovered)
-            order.insert(hovered, at: 0)
+        var hovered: Int?
+        if let target = hoveredIndex, windowFrames.indices.contains(target) {
+            order.remove(at: target)
+            order.insert(target, at: 0)
+            hovered = target
         }
         // Step 3: keep the most recently used windows, at most one per slot.
         let kept = Array(order.prefix(slotFrames.count))
-        // Step 4: optimal assignment.
+        // Step 4: the hovered window is pinned to the primary slot; the rest minimize Σ cost
+        // over the remaining slots. Without a hovered window: plain optimal assignment.
+        if let hovered {
+            let rest = kept.dropFirst()
+            let remainingSlots = Array(slotFrames.indices.dropFirst())
+            let costs = rest.map { window in
+                remainingSlots.map { slot in cost(window: windowFrames[window], slot: slotFrames[slot]) }
+            }
+            let slotForRest = solve(costs)
+            return [ArrangeMove(windowIndex: hovered, slotIndex: 0, frame: slotFrames[0])]
+                + rest.enumerated().compactMap { position, window in
+                    slotForRest[position].map { column in (window, remainingSlots[column]) }
+                }
+                .map { window, slot in ArrangeMove(windowIndex: window, slotIndex: slot, frame: slotFrames[slot]) }
+        }
         let costs = kept.map { window in
             slotFrames.map { slot in cost(window: windowFrames[window], slot: slot) }
         }

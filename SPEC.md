@@ -85,9 +85,15 @@ to which ideal position, and resizes and moves the items to the right spot"):
 2. Order front-to-back (CGWindowList z-order); the hovered window is always first.
 3. If windows > slots: keep the first `slots` windows (most recently used); the rest are left
    untouched.
-4. Assign the kept windows to slots with an optimal assignment (Hungarian / min-cost matching)
-   minimizing Σ cost, cost = distance between window center and slot center + 0.5 ×
-   (|Δwidth| + |Δheight|), all in points. If windows < slots, extra slots stay empty.
+4. The target window (hovered) takes the PRIMARY slot — slot index 0 in the preset's slot
+   order (the left full-height slot of the splits, the top-left cell of grids) — whatever its
+   position or size (macOS green-menu parity: the target always lands in the main position;
+   ninja, 1 Oct 2026 — pure min-cost sent a hovered mid-size window to a small right slot). The
+   remaining kept windows are assigned to the remaining slots with an optimal assignment
+   (Hungarian / min-cost matching) minimizing Σ cost, cost = distance between window center and
+   slot center + 0.5 × (|Δwidth| + |Δheight|), all in points. No target (hovered window nil or
+   out of range) → all kept windows are assigned by the same min-cost matching over all slots.
+   If windows < slots, extra slots stay empty.
 5. Move each window to its slot frame through the frame engine (§3).
 
 **Width variants (ninja, 22 Sep 2026).** EVERY preset above (move & resize, center and arrange)
@@ -102,6 +108,18 @@ with the layout drawn in the remaining width.
 In a `-sm` variant the ONLY free space is the inset strip on the left; the layout is the same
 as full width, just scaled horizontally into `width − inset` — windows still touch each other
 and the top/right/bottom screen edges.
+
+**Stage Manager auto-swap (ninja, 1 Oct 2026).** At apply time the engine resolves the variant
+matching the CURRENT Stage Manager state: with Stage Manager on, a full-width preset is applied
+as its `-sm` counterpart and a `-sm` preset as its full-width counterpart; with Stage Manager
+off, presets apply as-is. One choke point: `AXWindowEngine.apply` — so palette, hotkey, hover
+trigger and test harnesses all get the swap while the palette wells keep holding full-width ids
+(windows would otherwise tile under the strip, while macOS's own layouts adapt). Stage Manager
+is detected read-only via CFPreferences (`GloballyEnabled` key, `com.apple.WindowManager`
+domain); Tiler never writes defaults. Presets without a counterpart in the library (Center,
+custom presets) pass through unchanged. The Settings editor's "Full width / Stage Manager"
+switch is editorial only. With Stage Manager permanently on (this Mac), the practical effect is
+that full-width presets gain the 72 pt inset on the left.
 
 **No gaps between windows (ninja, 22 Sep 2026).** Window edges touch: gap is fixed at 0 and
 there is no gap control in the UI (the core may keep its gap parameter, always 0).
@@ -304,7 +322,8 @@ later components only fill their own directories. Interface contracts:
 - `PaletteController.shared.start(config: ConfigStore)` / `.stop()` — called by AppDelegate.
 - `ConfigStore` publishes changes (e.g. `NotificationCenter` name `.tilerConfigDidChange` or an
   `@Observable` model) so the palette and editor stay in sync.
-- `AXWindowEngine.apply(preset:, hoveredWindow:, screen:)` executes any preset.
+- `AXWindowEngine.apply(preset:, hoveredWindow:, screen:)` executes any preset, after resolving
+  the Stage Manager auto-swap of the preset (§1).
 
 ## 8. Quality bar (what critics judge against)
 

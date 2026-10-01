@@ -14,6 +14,11 @@ import func TilerTestSupport.screenIsLocked
 // build directory, sets TILER_ONLY_PIDS=<its pid> before the first engine call, and then:
 //   0. every preset has its width variant (`<id>` full visibleFrame, `<id>-sm` minus the Stage
 //      Manager inset on the left) and the engine's usable areas equal the ones computed here;
+//      the Stage Manager auto-swap (SPEC §1) is checked: with Stage Manager on the engine
+//      applies every preset as its OTHER width variant (`<id>` ⇄ `<id>-sm`, one choke point in
+//      AXWindowEngine.apply), detected read-only via CFPreferences (GloballyEnabled,
+//      com.apple.WindowManager) — read here independently, and every expectation below is
+//      computed for the effective (swapped) preset;
 //   1. every move & resize / center preset (both variants) on TW1 (strict ≤ 1 pt per edge vs
 //      Geometry; left/right edges exactly on visibleFrame.minX (+ inset) / maxX), TW2 and TW3
 //      (re-align rule), each followed by Revert (≤ 1 pt back to the start frame); TW1 frames of
@@ -21,15 +26,22 @@ import func TilerTestSupport.screenIsLocked
 //   2. every arrange preset (both variants) with k−1, k and k+1 visible windows (k = slots), and
 //      additionally with exactly 1 and exactly 2 visible windows whenever k > 2 (for k ≤ 2 those
 //      coincide with the k−1 / k scenarios):
-//      windows are first placed near shuffled slots; the harness checks each landed in its
-//      nearest slot (cost of SPEC §1 step 4), that the hovered TW1 is always kept, that windows
-//      beyond the visible ones stay untouched, that neighbouring slots / windows share edges
-//      exactly and the rightmost end at visibleFrame.maxX, and that Revert of the arrange
-//      restores every frame; with exactly 2 windows the two land in different slots at the
-//      pairing with the least total cost (brute-forced here from the 2×2 cost matrix);
-//      Revert also after windows were ordered out and in again ("show 0" → "show N", which
-//      replaces their AX elements): one window, a whole arrange, and an arrange with one window
-//      still ordered out (it keeps its history and is restored by a second Revert once shown);
+//      windows are first placed near shuffled slots (TW1 near the primary slot, or deliberately
+//      far from it in one scenario — the SPEC §1 position-independence proof); the harness
+//      predicts each window's slot ITSELF from the SPEC §1 rules with its own cost() and its own
+//      exact min-cost solver (DP over slot subsets) — the hovered TW1 is pinned to the primary
+//      slot whatever its position or size (macOS green-menu parity, ninja 1 Oct 2026), the
+//      remaining kept windows minimize Σ cost over the remaining slots, and without a target all
+//      kept windows minimize Σ cost over all slots — and checks the engine matched that
+//      prediction, that the hovered TW1 is always kept, that windows beyond the visible ones
+//      stay untouched, that neighbouring slots / windows share edges exactly and the rightmost
+//      end at visibleFrame.maxX, and that Revert of the arrange restores every frame; with
+//      exactly 2 windows the pairing is likewise re-derived from the 2×2 cost matrix (the setup
+//      precondition — each staged window's nearest slot by a clear margin — makes every optimum
+//      unique, so a tie cannot mislead); Revert also after windows were ordered out and in again
+//      ("show 0" → "show N", which replaces their AX elements): one window, a whole arrange, and
+//      an arrange with one window still ordered out (it keeps its history and is restored by a
+//      second Revert once shown);
 //   3. target capture for the menu-bar / hotkey triggers: `focusedWindow()` follows the focused
 //      test window (TW1, TW2), its element drives `apply`, and it is nil when the helper is not in
 //      TILER_ONLY_PIDS, while TW1 has a sheet, and with no window shown ("show 0"); arrange with
@@ -101,6 +113,38 @@ func describe(_ r: CGRect) -> String {
 func cost(_ window: CGRect, _ slot: CGRect) -> CGFloat {
     hypot(window.midX - slot.midX, window.midY - slot.midY)
         + 0.5 * (abs(window.width - slot.width) + abs(window.height - slot.height))
+}
+
+/// Exact minimum-cost assignment of rows (windows) to columns (slots), `rows <= columns`, one
+/// distinct column per row — the harness's own solver (DP over slot subsets, ≤ 16 slots keep the
+/// table trivial), independent of the engine's `Assignment.solve`. Returns each row's column.
+func minCostAssignment(_ costs: [[CGFloat]]) -> [Int] {
+    let rows = costs.count, columns = costs.first?.count ?? 0
+    precondition(rows <= columns, "assignment needs at least one column per row")
+    var best = [CGFloat](repeating: .infinity, count: 1 << columns)
+    var choice = [Int](repeating: -1, count: 1 << columns)
+    best[0] = 0
+    for mask in 0..<(1 << columns) {
+        let row = mask.nonzeroBitCount
+        guard row < rows, best[mask].isFinite else { continue }
+        for column in 0..<columns where mask & (1 << column) == 0 {
+            let next = mask | (1 << column)
+            let candidate = best[mask] + costs[row][column]
+            if candidate < best[next] { best[next] = candidate; choice[next] = column }
+        }
+    }
+    var endMask = 0, endCost = CGFloat.infinity
+    for mask in 0..<(1 << columns) where mask.nonzeroBitCount == rows && best[mask] < endCost {
+        endCost = best[mask]; endMask = mask
+    }
+    var assignment = [Int](repeating: -1, count: rows)
+    var mask = endMask
+    while mask != 0 {
+        let row = mask.nonzeroBitCount - 1
+        assignment[row] = choice[mask]
+        mask &= ~(1 << choice[mask])
+    }
+    return assignment
 }
 
 /// Whether `b` lies directly right of / below `a` in unit space (shared edge, overlapping span).
@@ -422,6 +466,31 @@ report("helper windows", "\(windowCount) windows via AX + CG", [], note: "pid \(
 
 guard let screen = ScreenGeometry.screen(forWindowFrame: testWindows[0].initial) else { bail("screen", "no screen") }
 
+// Stage Manager state, read here independently of the engine (SPEC §1 "Stage Manager
+// auto-swap"): `GloballyEnabled` in the `com.apple.WindowManager` domain, read-only — never
+// written. The engine applies every preset as its other width variant while this is on.
+let stageManagerEnabled: Bool = {
+    let domain = "com.apple.WindowManager" as CFString
+    CFPreferencesAppSynchronize(domain)
+    guard let raw = CFPreferencesCopyAppValue("GloballyEnabled" as CFString, domain) else { return false }
+    if CFGetTypeID(raw) == CFBooleanGetTypeID() { return raw as! Bool }
+    if let number = raw as? NSNumber { return number.boolValue }
+    if let text = raw as? String { return text == "1" || text == "true" }
+    return false
+}()
+
+/// SPEC §1 "Stage Manager auto-swap" (AXWindowEngine.apply): with Stage Manager on, a full-width
+/// preset is applied as its `-sm` variant and a `-sm` preset as its full-width counterpart;
+/// without, presets apply as-is. Own implementation (suffix surgery + library lookup), so the
+/// expectation does not reuse the engine's helper.
+func effectivePreset(_ preset: Preset) -> Preset {
+    guard stageManagerEnabled else { return preset }
+    let id = preset.isStageManagerVariant
+        ? String(preset.id.dropLast(Preset.stageManagerIDSuffix.count))
+        : preset.id + Preset.stageManagerIDSuffix
+    return PresetLibrary.preset(id: id) ?? preset
+}
+
 // Usable areas computed here without the engine (SPEC §1 "Width variants"): visibleFrame flipped
 // with the primary screen; `-sm` presets leave the Stage Manager inset free on the left; gap 0.
 // Edges are rounded to whole points: window frames cannot sit on half points (the system
@@ -464,6 +533,30 @@ for id in ["fill", "fill-sm"] {
     let engines = ScreenGeometry.usableArea(of: screen, for: preset, stageManagerInset: settings.stageManagerInset)
     report("usable area", id, engines == mine ? [] : ["engine \(describe(engines.rect)) != \(describe(mine.rect))"],
            note: describe(mine.rect))
+}
+
+// SPEC §1 "Stage Manager auto-swap": the engine applies the width variant matching the current
+// Stage Manager state. Checked here structurally — the mapping flips exactly the `-sm` suffix
+// while Stage Manager is on, is an involution, and preserves kind and rects. The behavioral
+// half (every apply really lands on the swapped variant's frames) is what all the expectation
+// rows below verify, each computed for the effective preset.
+do {
+    var problems: [String] = []
+    for preset in PresetLibrary.all {
+        let wantedID = stageManagerEnabled
+            ? (preset.isStageManagerVariant
+               ? String(preset.id.dropLast(Preset.stageManagerIDSuffix.count))
+               : preset.id + Preset.stageManagerIDSuffix)
+            : preset.id
+        let effective = effectivePreset(preset)
+        if effective.id != wantedID { problems.append("\(preset.id) → \(effective.id), want \(wantedID)") }
+        if effectivePreset(effective).id != preset.id { problems.append("swap is not an involution at \(preset.id)") }
+        if effective.kind != preset.kind || effective.rects != preset.rects {
+            problems.append("\(effective.id) differs from \(preset.id)")
+        }
+    }
+    report("SM auto-swap", stageManagerEnabled ? "Stage Manager on: full-width applies as -sm and back"
+                                               : "Stage Manager off: presets apply as-is", problems)
 }
 
 // Every other on-screen layer-0 window (the only layer the engine ever acts on), snapshotted once
@@ -532,7 +625,10 @@ guard send("show 3") else { bail("helper control", "no reply to show 3") }
 let singleTargets = Array(testWindows.prefix(3))
 var landed: [String: CGRect] = [:]  // preset id → TW1 frame after apply
 
-for preset in PresetLibrary.all where preset.kind != .arrange {
+for requested in PresetLibrary.all where requested.kind != .arrange {
+    // The engine applies the width variant matching the Stage Manager state (SPEC §1 auto-swap);
+    // every expectation below is computed for that effective preset, keyed by the requested id.
+    let preset = effectivePreset(requested)
     let area = usableArea(for: preset)
     for window in singleTargets {
         var problems: [String] = []
@@ -540,9 +636,9 @@ for preset in PresetLibrary.all where preset.kind != .arrange {
         let before = frame(window)
         let bystanders = singleTargets.filter { $0.number != window.number }.map { ($0, frame($0)) }
 
-        let result = engine.apply(preset: preset, hoveredWindow: window.element, screen: screen)
+        let result = engine.apply(preset: requested, hoveredWindow: window.element, screen: screen)
         let after = frame(window)
-        if window.number == 1 { landed[preset.id] = after }
+        if window.number == 1 { landed[requested.id] = after }
         let target = preset.rect.map(area.frame(for:)) ?? area.centeredFrame(size: before.size)
         let want = expected(window, target: target, unit: preset.rect, area: area, sizeBefore: before.size)
         let error = edgeError(after, want)
@@ -572,14 +668,16 @@ for preset in PresetLibrary.all where preset.kind != .arrange {
         if revertError > 1 { problems.append("revert got \(describe(reverted)) want \(describe(before))") }
         if engine.hasHistory(window.element) { problems.append("history kept after revert") }
         let note = result.moves.first?.realigned == true ? "re-aligned" : ""
-        report(preset.id, window.label, problems, maxError: max(error, revertError), note: note)
+        report(requested.id, window.label, problems, maxError: max(error, revertError), note: note)
     }
 }
 
-// Neighbouring single-window presets of one width variant touch: e.g. left-half-sm ends exactly
-// where right-half-sm starts, and right-edge presets end at visibleFrame.maxX (TW1 frames).
+// Neighbouring single-window presets of one width variant touch: e.g. left-half ends exactly
+// where right-half starts, and right-edge presets end at visibleFrame.maxX (TW1 frames). The
+// groups are the EFFECTIVE variants (the Stage Manager auto-swap decides which frames an
+// applied preset gets), so this checks the layout the engine really produced.
 for stageManager in [false, true] {
-    let presets = PresetLibrary.all.filter { $0.kind == .moveResize && isStageManagerVariant($0) == stageManager }
+    let presets = PresetLibrary.all.filter { $0.kind == .moveResize && isStageManagerVariant(effectivePreset($0)) == stageManager }
     let placed = presets.filter { landed[$0.id] != nil }
     let problems = touching(placed.compactMap(\.rect), placed.compactMap { landed[$0.id] },
                             names: placed.map(\.id), tolerance: 0.5)
@@ -633,7 +731,13 @@ func stagingFrame(for window: TestWindow, near slot: CGRect) -> CGRect {
 
 /// `withTarget` false = the menu-bar / hotkey trigger without a usable target: the engine gets
 /// `hoveredWindow: nil` and must keep the front-most windows in plain z-order.
-func runArrange(_ preset: Preset, visibleCount: Int, withTarget: Bool = true) {
+/// `stageHoveredFar` = TW1 is staged far from the primary slot yet must still land there (SPEC §1
+/// position-independence proof: the pin overrides cost).
+func runArrange(_ requested: Preset, visibleCount: Int, withTarget: Bool = true, stageHoveredFar: Bool = false) {
+    // SPEC §1 "Stage Manager auto-swap": the engine applies the width variant matching the Stage
+    // Manager state; slots, areas and expectations are computed for that effective preset, and
+    // the requested preset is what the engine is called with.
+    let preset = effectivePreset(requested)
     let area = usableArea(for: preset)
     let slots = area.slotFrames(for: preset)
     let slotCount = slots.count
@@ -648,9 +752,10 @@ func runArrange(_ preset: Preset, visibleCount: Int, withTarget: Bool = true) {
     }
     let relation = visibleCount < slotCount ? "fewer" : visibleCount > slotCount ? "more" : "equal"
     let scenario = (withTarget ? "" : "no target, ") + "\(visibleCount) windows, \(slotCount) slots (\(relation))"
+        + (stageHoveredFar ? ", TW1 staged far from the primary slot" : "")
     var problems: [String] = variantProblems
     guard send("show \(visibleCount)") else {
-        report(preset.id, scenario, ["helper did not confirm show \(visibleCount)"])
+        report(requested.id, scenario, ["helper did not confirm show \(visibleCount)"])
         return
     }
     let visibleWindows = Array(testWindows.prefix(visibleCount))
@@ -662,13 +767,21 @@ func runArrange(_ preset: Preset, visibleCount: Int, withTarget: Bool = true) {
     let kept = withTarget ? [hovered] + keptOthers : Array(visibleWindows.suffix(keptCount))
     let dropped = visibleWindows.filter { w in !kept.contains { $0.number == w.number } }
 
-    // Place each kept window near its own shuffled slot; dropped windows at their cascade frame.
+    // Staging: with a target, TW1 is pinned to the primary slot by rule (not by cost), so it is
+    // staged near slot 0 — or, for the position-independence proof, deliberately far from it;
+    // the remaining kept windows are staged near their own shuffled slots among the rest.
     // A constrained window takes the first shuffled slot its staging frame fits around without
     // leaving the usable area (else the OS would push it towards a neighbouring slot).
-    var order = shuffled(slotCount, seed: "\(preset.id)/\(visibleCount)")
-    var intended: [Int: Int] = [:]  // window number → slot
-    let constrainedFirst = kept.filter { if case .none = $0.constraint { false } else { true } }
-        + kept.filter { if case .none = $0.constraint { true } else { false } }
+    var order = shuffled(slotCount, seed: "\(requested.id)/\(visibleCount)")
+    var intended: [Int: Int] = [:]  // window number → staged slot (prediction is derived below)
+    let stagedOthers = withTarget ? keptOthers : kept
+    if withTarget {
+        order.removeAll { $0 == 0 }
+        intended[hovered.number] = 0
+        place(hovered, stagingFrame(for: hovered, near: slots[stageHoveredFar ? slotCount - 1 : 0]))
+    }
+    let constrainedFirst = stagedOthers.filter { if case .none = $0.constraint { false } else { true } }
+        + stagedOthers.filter { if case .none = $0.constraint { true } else { false } }
     for window in constrainedFirst {
         let index = order.firstIndex { area.rect.contains(stagingFrame(for: window, near: slots[$0])) } ?? 0
         let slot = order.remove(at: index)
@@ -705,11 +818,13 @@ func runArrange(_ preset: Preset, visibleCount: Int, withTarget: Bool = true) {
     if candidateIDs != wantCandidates { problems.append("enumerator returned \(candidates.count) windows in wrong order") }
     if candidates.contains(where: { $0.pid != testPID }) { problems.append("enumerator returned a non-test window") }
 
-    // Closest-slot precondition from the read-back frames: each kept window's nearest slot is its
-    // intended one, by a clear margin — so the optimal assignment must be exactly that.
+    // Setup precondition from the read-back frames: every window whose slot the prediction
+    // derives by cost must have its staged slot as nearest by a clear margin — so the optimum is
+    // unique and the prediction below is well-defined. TW1 when staged far is exempt: its pin is
+    // exactly what overrides cost.
     var before: [Int: CGRect] = [:]
     for window in visibleWindows { before[window.number] = frame(window) }
-    for window in kept {
+    for window in kept where !(withTarget && stageHoveredFar && window.number == hovered.number) {
         let costs = slots.map { cost(before[window.number]!, $0) }
         let ranked = costs.indices.sorted { costs[$0] < costs[$1] }
         if ranked[0] != intended[window.number] || (ranked.count > 1 && costs[ranked[1]] - costs[ranked[0]] <= 1) {
@@ -717,11 +832,26 @@ func runArrange(_ preset: Preset, visibleCount: Int, withTarget: Bool = true) {
         }
     }
 
-    let result = engine.apply(preset: preset, hoveredWindow: target, screen: screen)
+    let result = engine.apply(preset: requested, hoveredWindow: target, screen: screen)
+
+    // Predicted assignment, derived here from the SPEC §1 rules with the harness's own cost()
+    // and min-cost solver (independent of the engine): with a target the hovered TW1 is pinned
+    // to the primary slot whatever its position or size (macOS green-menu parity, ninja
+    // 1 Oct 2026) and the remaining kept windows minimize Σ cost over the remaining slots;
+    // without a target all kept windows minimize Σ cost over all slots.
+    let predictedWindows = withTarget ? keptOthers : kept
+    let predictedSlots = withTarget ? Array(slots.indices.dropFirst()) : Array(slots.indices)
+    let chosen = minCostAssignment(predictedWindows.map { window in
+        predictedSlots.map { cost(before[window.number]!, slots[$0]) }
+    })
+    var predicted: [Int: Int] = [:]  // window number → slot
+    if withTarget { predicted[hovered.number] = 0 }
+    for (row, window) in predictedWindows.enumerated() { predicted[window.number] = predictedSlots[chosen[row]] }
+
     var maxError: CGFloat = 0
     if result.moves.count != keptCount { problems.append("\(result.moves.count) moves, want \(keptCount)") }
     for window in kept {
-        guard let slot = intended[window.number] else { continue }
+        guard let slot = predicted[window.number] else { continue }
         let unit = preset.slots[slot]
         let want = expected(window, target: slots[slot], unit: unit, area: area, sizeBefore: before[window.number]!.size)
         let got = frame(window)
@@ -731,33 +861,9 @@ func runArrange(_ preset: Preset, visibleCount: Int, withTarget: Bool = true) {
         let reportedSlot = result.moves.first { $0.windowID == window.windowID }?.slotIndex
         if reportedSlot != slot { problems.append("\(window.name) engine slot \(reportedSlot.map(String.init) ?? "none") != \(slot)") }
     }
-    // Exactly 2 windows: brute-force the 2×2 cost matrix (cost() above) over all ordered slot
-    // pairs and compare with the engine's assignment — the two windows must go to two different
-    // slots, at the pairing with the least total cost. The setup precondition (each window's
-    // nearest slot by a margin > 1) makes that optimum unique, so a tie cannot mislead here.
-    if keptCount == 2 {
-        let pairingCosts = kept.map { window in slots.map { cost(before[window.number]!, $0) } }
-        var optimum: (first: Int, second: Int)?
-        var optimumTotal = CGFloat.infinity
-        for first in slots.indices {
-            for second in slots.indices where first != second {
-                let total = pairingCosts[0][first] + pairingCosts[1][second]
-                if total < optimumTotal { optimumTotal = total; optimum = (first, second) }
-            }
-        }
-        let engineSlots = kept.map { window in result.moves.first { $0.windowID == window.windowID }?.slotIndex }
-        if let optimum {
-            if engineSlots != [optimum.first, optimum.second] {
-                problems.append("engine pairing \(engineSlots.map { $0.map(String.init) ?? "none" }.joined(separator: " + "))"
-                                + " != least-cost pairing \(optimum.first) + \(optimum.second)")
-            }
-        } else {
-            problems.append("no two-slot pairing among \(slots.count) slots")
-        }
-    }
     // Actual windows in neighbouring slots touch (resizable ones; constrained ones may overlap).
     let resizableKept = kept.filter { if case .none = $0.constraint { true } else { false } }
-    problems += touching(resizableKept.map { preset.slots[intended[$0.number]!] }, resizableKept.map(frame),
+    problems += touching(resizableKept.map { preset.slots[predicted[$0.number]!] }, resizableKept.map(frame),
                          names: resizableKept.map(\.name), tolerance: 0.5)
     for window in dropped where edgeError(frame(window), before[window.number]!) > 0.5 {
         problems.append("\(window.name) should be untouched but moved")
@@ -795,12 +901,12 @@ func runArrange(_ preset: Preset, visibleCount: Int, withTarget: Bool = true) {
         problems.append("history kept after revert")
     }
     let realigned = result.moves.filter(\.realigned).count
-    report(preset.id, scenario, problems, maxError: max(maxError, revertError),
+    report(requested.id, scenario, problems, maxError: max(maxError, revertError),
            note: realigned > 0 ? "\(realigned) re-aligned" : "")
 }
 
-for preset in PresetLibrary.all where preset.kind == .arrange {
-    let slotCount = preset.slots.count
+for requested in PresetLibrary.all where requested.kind == .arrange {
+    let slotCount = requested.slots.count
     // Fewer-windows-than-slots coverage: every arrange preset is additionally applied with
     // exactly 1 and exactly 2 visible windows. For k ≤ 2 those coincide with the k−1 / k
     // scenarios above, so they are added for k > 2 only (deduplicated, so a k = 3 preset where
@@ -809,7 +915,14 @@ for preset in PresetLibrary.all where preset.kind == .arrange {
     if slotCount > 2 { counts += [1, 2] }
     var ran = Set<Int>()
     for visibleCount in counts where (1...windowCount).contains(visibleCount) {
-        if ran.insert(visibleCount).inserted { runArrange(preset, visibleCount: visibleCount) }
+        guard ran.insert(visibleCount).inserted else { continue }
+        runArrange(requested, visibleCount: visibleCount)
+        // SPEC §1 position-independence proof: TW1 staged far from the primary slot still takes
+        // it. The 1+3 case is the regression that motivated the rule (ninja, 1 Oct 2026: with
+        // pure min-cost his hovered mid-size window went to a small right slot).
+        if requested.id == "arrange-1+3", visibleCount == 4 {
+            runArrange(requested, visibleCount: visibleCount, stageHoveredFar: true)
+        }
     }
 }
 
@@ -1047,11 +1160,11 @@ if send("show 3") {
     }
 
     // The captured element drives the engine like the hovered one.
-    if let focused = awaitFocusedWindow(windows[0]), let preset = PresetLibrary.preset(id: "left-half") {
+    if let focused = awaitFocusedWindow(windows[0]), let requested = PresetLibrary.preset(id: "left-half") {
         var problems: [String] = []
         let before = frame(windows[0])
-        let result = engine.apply(preset: preset, hoveredWindow: focused, screen: screen)
-        let want = usableArea(for: preset).frame(for: preset.rect!)
+        let result = engine.apply(preset: requested, hoveredWindow: focused, screen: screen)
+        let want = usableArea(for: effectivePreset(requested)).frame(for: requested.rect!)
         let error = edgeError(frame(windows[0]), want)
         if result.moves.count != 1 || error > 1 { problems.append("got \(describe(frame(windows[0]))) want \(describe(want))") }
         if !engine.revert(focused) || edgeError(frame(windows[0]), before) > 1 { problems.append("revert failed") }

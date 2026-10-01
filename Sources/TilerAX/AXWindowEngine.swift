@@ -55,8 +55,14 @@ public final class AXWindowEngine {
     /// `settings.stageManagerInset` on the left for `-sm` presets. Does not raise windows — call
     /// `raise(_:)` if wanted.
     /// Every moved window is recorded for Revert.
+    ///
+    /// SPEC §1 "Stage Manager auto-swap": the preset executed here is the width variant matching
+    /// the CURRENT Stage Manager state (`stageManagerAutoSwap(of:)`, resolved once per call), so
+    /// palette, hotkey, hover trigger and test harnesses all get the swap from this one choke
+    /// point while their palette wells keep holding full-width ids.
     @discardableResult
-    public func apply(preset: Preset, hoveredWindow: AXUIElement?, screen: NSScreen) -> ApplyResult {
+    public func apply(preset requested: Preset, hoveredWindow: AXUIElement?, screen: NSScreen) -> ApplyResult {
+        let preset = Self.stageManagerAutoSwap(of: requested)
         if let hoveredWindow { AX.prepare(hoveredWindow) }
         let area = ScreenGeometry.usableArea(
             of: screen, for: preset, stageManagerInset: settings.stageManagerInset)
@@ -139,6 +145,37 @@ public final class AXWindowEngine {
         let move = Move(element: window, pid: pid, windowID: windowID, slotIndex: slotIndex, before: before,
                         target: target, final: set.final, sizeSettable: set.sizeSettable, realigned: set.realigned)
         return (move, key)
+    }
+
+    // MARK: Stage Manager auto-swap (SPEC §1 "Width variants")
+
+    /// True while macOS Stage Manager is on: `GloballyEnabled` in the `com.apple.WindowManager`
+    /// domain, read via CFPreferences (a read-only check of macOS's own state — Tiler never
+    /// writes defaults). False when the key is missing or unreadable, so the swap then does
+    /// nothing. The value is read fresh on every call and cached only for that one `apply`.
+    private static func stageManagerEnabled() -> Bool {
+        let domain = "com.apple.WindowManager" as CFString
+        CFPreferencesAppSynchronize(domain)
+        guard let raw = CFPreferencesCopyAppValue("GloballyEnabled" as CFString, domain) else { return false }
+        if CFGetTypeID(raw) == CFBooleanGetTypeID() { return raw as! Bool }
+        if let number = raw as? NSNumber { return number.boolValue }
+        if let text = raw as? String { return text == "1" || text == "true" }
+        return false
+    }
+
+    /// The preset `apply` executes: `preset` itself, or — while Stage Manager is on — its other
+    /// width variant: a full-width preset as `<id>-sm` and a `-sm` preset as its full-width
+    /// counterpart (ninja, 1 Oct 2026: palette wells hold full-width ids, so windows would
+    /// otherwise tile under the Stage Manager strip, while macOS's own layouts adapt to it).
+    /// Presets without a counterpart in the library (e.g. `.center`, custom presets) pass
+    /// through unchanged. The Settings editor's "Full width / Stage Manager" switch stays
+    /// editorial only.
+    private static func stageManagerAutoSwap(of preset: Preset) -> Preset {
+        guard stageManagerEnabled() else { return preset }
+        let id = preset.isStageManagerVariant
+            ? String(preset.id.dropLast(Preset.stageManagerIDSuffix.count))
+            : preset.id + Preset.stageManagerIDSuffix
+        return PresetLibrary.preset(id: id) ?? preset
     }
 
     // MARK: Primitives for hover / palette (C3)

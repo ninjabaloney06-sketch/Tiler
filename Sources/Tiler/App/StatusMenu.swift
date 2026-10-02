@@ -172,12 +172,14 @@ final class StatusItemPillView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     override func draw(_ dirtyRect: NSRect) {
-        // Capsule inset 2 pt from the button's bounds, like the system's rounded item highlight;
-        // translucent gray that adapts to the menu bar appearance (dark on light, light on dark).
-        let rect = bounds.insetBy(dx: 2, dy: 2)
+        // Rounded pill inset 1 pt from the button's bounds, matched to the system's menu-open
+        // item highlight (measured against the classic menu's native highlight, 2 Oct 2026):
+        // soft corner radius (~1/3 of height, not a circle), subtle tone that adapts to the
+        // menu bar appearance (light on dark, dark on light).
+        let rect = bounds.insetBy(dx: -3, dy: -1)
         let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        (dark ? NSColor.white.withAlphaComponent(0.22) : NSColor.black.withAlphaComponent(0.18)).setFill()
-        NSBezierPath(roundedRect: rect, xRadius: rect.height / 2, yRadius: rect.height / 2).fill()
+        (dark ? NSColor.white.withAlphaComponent(0.11) : NSColor.black.withAlphaComponent(0.10)).setFill()
+        NSBezierPath(roundedRect: rect, xRadius: min(rect.height / 3, 10), yRadius: min(rect.height / 3, 10)).fill()
     }
 }
 
@@ -196,7 +198,7 @@ enum StatusItemPill {
 
     private static func pill(in button: NSStatusBarButton) -> StatusItemPillView {
         if let existing = button.subviews.compactMap({ $0 as? StatusItemPillView }).first { return existing }
-        let view = StatusItemPillView(frame: button.bounds)
+        let view = StatusItemPillView(frame: button.bounds.insetBy(dx: -4, dy: 0))
         view.autoresizingMask = [.width, .height]
         button.addSubview(view)
         return view

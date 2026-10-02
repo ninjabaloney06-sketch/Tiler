@@ -42,11 +42,8 @@ import TilerTestSupport
 //      menu-bar palette is open, gone after every dismissal path (apply, Esc, click outside,
 //      target closed, second icon click, classic menu, Pause);
 //   7. idle CPU of Tiler over 10 s < 1 %.
-// Expected frames go through the Stage Manager auto-swap (SPEC §1, one choke point in
-// AXWindowEngine.apply): with Stage Manager on the engine applies every palette preset as its
-// `-sm` variant and a `-sm` preset as its full-width counterpart, detected read-only here via
-// CFPreferences (GloballyEnabled, com.apple.WindowManager) — the palette wells keep holding
-// full-width ids.
+// Tiler runs with TILER_NO_ANIMATE set (the engine's glide, SPEC §3, is off — expected frames
+// are read exact, with no timing dependence).
 // After every step: NSWorkspace.frontmostApplication is still the helper, Tiler is not active.
 // Before/after snapshot of every other app's layer-0 window: must not change (a user moving
 // windows during the run shows up here too).
@@ -304,6 +301,7 @@ if CommandLine.arguments.contains("--editor") {
         var environment = ProcessInfo.processInfo.environment
         // The only allowed pid is this test process, which has no windows.
         environment[WindowEnumerator.pidFilterVariable] = "\(getpid())"
+        environment[FrameSetter.noAnimateVariable] = "1"
         process.environment = environment
         process.standardOutput = FileHandle.nullDevice
         let log = FileHandle(forWritingAtPath: tilerLog.path)
@@ -624,33 +622,7 @@ place("TW2", start2)
 _ = raiseHelper()
 report("helper", [], note: "pid \(helperPID), TW1 \(describe(frameOf("TW1"))), frontmost")
 
-// Stage Manager state, read here independently of the engine (SPEC §1 "Stage Manager
-// auto-swap"): `GloballyEnabled` in the `com.apple.WindowManager` domain, read-only — never
-// written. The engine applies every preset as its other width variant while this is on.
-let stageManagerEnabled: Bool = {
-    let domain = "com.apple.WindowManager" as CFString
-    CFPreferencesAppSynchronize(domain)
-    guard let raw = CFPreferencesCopyAppValue("GloballyEnabled" as CFString, domain) else { return false }
-    if CFGetTypeID(raw) == CFBooleanGetTypeID() { return raw as! Bool }
-    if let number = raw as? NSNumber { return number.boolValue }
-    if let text = raw as? String { return text == "1" || text == "true" }
-    return false
-}()
-
-/// The id whose frame the engine really produces for a palette preset (SPEC §1 "Stage Manager
-/// auto-swap", one choke point in `AXWindowEngine.apply`): with Stage Manager on a full-width
-/// preset applies as its `-sm` variant and a `-sm` preset as its full-width counterpart; without,
-/// as-is. Own suffix surgery (the tiler-harness does the same), so the expectation does not reuse
-/// the engine's helper. The palette wells keep holding full-width ids.
-func effectiveID(_ id: String) -> String {
-    guard stageManagerEnabled, let preset = PresetLibrary.preset(id: id) else { return id }
-    let swapped = preset.isStageManagerVariant
-        ? String(preset.id.dropLast(Preset.stageManagerIDSuffix.count))
-        : preset.id + Preset.stageManagerIDSuffix
-    return PresetLibrary.preset(id: swapped)?.id ?? id
-}
-
-func expectedFrame(_ id: String) -> CGRect { TilerTestSupport.expectedFrame(effectiveID(id), screen: screen) }
+func expectedFrame(_ id: String) -> CGRect { TilerTestSupport.expectedFrame(id, screen: screen) }
 
 // Every other app's window on this Space, by CGWindowID, with its AX frame (read only), once the
 // helper is on stage. AX, not CG bounds: with Stage Manager on, CG reports a strip thumbnail for
@@ -669,6 +641,7 @@ do {
     process.arguments = ["--config", configURL.path]
     var environment = ProcessInfo.processInfo.environment
     environment[WindowEnumerator.pidFilterVariable] = "\(helperPID)"
+    environment[FrameSetter.noAnimateVariable] = "1"
     process.environment = environment
     process.standardOutput = FileHandle.nullDevice
     FileManager.default.createFile(atPath: tilerLog.path, contents: nil)

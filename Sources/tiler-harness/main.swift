@@ -11,14 +11,11 @@ import func TilerTestSupport.screenIsLocked
 //   .build-c2/debug/tiler-harness
 //
 // Launches TilerTestWindows (17 windows; TW2 min-size 480×440, TW3 fixed 360×240) from the same
-// build directory, sets TILER_ONLY_PIDS=<its pid> before the first engine call, and then:
+// build directory, sets TILER_ONLY_PIDS=<its pid> before the first engine call and
+// TILER_NO_ANIMATE (the engine's glide, SPEC §3, is off — frame checks read exact frames without
+// timing dependence), and then:
 //   0. every preset has its width variant (`<id>` full visibleFrame, `<id>-sm` minus the Stage
 //      Manager inset on the left) and the engine's usable areas equal the ones computed here;
-//      the Stage Manager auto-swap (SPEC §1) is checked: with Stage Manager on the engine
-//      applies every preset as its OTHER width variant (`<id>` ⇄ `<id>-sm`, one choke point in
-//      AXWindowEngine.apply), detected read-only via CFPreferences (GloballyEnabled,
-//      com.apple.WindowManager) — read here independently, and every expectation below is
-//      computed for the effective (swapped) preset;
 //   1. every move & resize / center preset (both variants) on TW1 (strict ≤ 1 pt per edge vs
 //      Geometry; left/right edges exactly on visibleFrame.minX (+ inset) / maxX), TW2 and TW3
 //      (re-align rule), each followed by Revert (≤ 1 pt back to the start frame); TW1 frames of
@@ -55,6 +52,11 @@ import func TilerTestSupport.screenIsLocked
 // check is possible), and 2 if the screen was locked by the end of the run (results invalid).
 
 signal(SIGPIPE, SIG_IGN)
+
+// The engine's glide (SPEC §3) is off for this suite: frame checks must read exact frames with
+// no timing dependence. Set at startup, read by FrameSetter on every move (TILER_ONLY_PIDS
+// pattern). The glide itself is proven live separately (see SPEC §8).
+setenv(FrameSetter.noAnimateVariable, "1", 1)
 
 let engine = AXWindowEngine.shared
 let settings = TilerSettings.default
@@ -466,31 +468,6 @@ report("helper windows", "\(windowCount) windows via AX + CG", [], note: "pid \(
 
 guard let screen = ScreenGeometry.screen(forWindowFrame: testWindows[0].initial) else { bail("screen", "no screen") }
 
-// Stage Manager state, read here independently of the engine (SPEC §1 "Stage Manager
-// auto-swap"): `GloballyEnabled` in the `com.apple.WindowManager` domain, read-only — never
-// written. The engine applies every preset as its other width variant while this is on.
-let stageManagerEnabled: Bool = {
-    let domain = "com.apple.WindowManager" as CFString
-    CFPreferencesAppSynchronize(domain)
-    guard let raw = CFPreferencesCopyAppValue("GloballyEnabled" as CFString, domain) else { return false }
-    if CFGetTypeID(raw) == CFBooleanGetTypeID() { return raw as! Bool }
-    if let number = raw as? NSNumber { return number.boolValue }
-    if let text = raw as? String { return text == "1" || text == "true" }
-    return false
-}()
-
-/// SPEC §1 "Stage Manager auto-swap" (AXWindowEngine.apply): with Stage Manager on, a full-width
-/// preset is applied as its `-sm` variant and a `-sm` preset as its full-width counterpart;
-/// without, presets apply as-is. Own implementation (suffix surgery + library lookup), so the
-/// expectation does not reuse the engine's helper.
-func effectivePreset(_ preset: Preset) -> Preset {
-    guard stageManagerEnabled else { return preset }
-    let id = preset.isStageManagerVariant
-        ? String(preset.id.dropLast(Preset.stageManagerIDSuffix.count))
-        : preset.id + Preset.stageManagerIDSuffix
-    return PresetLibrary.preset(id: id) ?? preset
-}
-
 // Usable areas computed here without the engine (SPEC §1 "Width variants"): visibleFrame flipped
 // with the primary screen; `-sm` presets leave the Stage Manager inset free on the left; gap 0.
 // Edges are rounded to whole points: window frames cannot sit on half points (the system
@@ -533,30 +510,6 @@ for id in ["fill", "fill-sm"] {
     let engines = ScreenGeometry.usableArea(of: screen, for: preset, stageManagerInset: settings.stageManagerInset)
     report("usable area", id, engines == mine ? [] : ["engine \(describe(engines.rect)) != \(describe(mine.rect))"],
            note: describe(mine.rect))
-}
-
-// SPEC §1 "Stage Manager auto-swap": the engine applies the width variant matching the current
-// Stage Manager state. Checked here structurally — the mapping flips exactly the `-sm` suffix
-// while Stage Manager is on, is an involution, and preserves kind and rects. The behavioral
-// half (every apply really lands on the swapped variant's frames) is what all the expectation
-// rows below verify, each computed for the effective preset.
-do {
-    var problems: [String] = []
-    for preset in PresetLibrary.all {
-        let wantedID = stageManagerEnabled
-            ? (preset.isStageManagerVariant
-               ? String(preset.id.dropLast(Preset.stageManagerIDSuffix.count))
-               : preset.id + Preset.stageManagerIDSuffix)
-            : preset.id
-        let effective = effectivePreset(preset)
-        if effective.id != wantedID { problems.append("\(preset.id) → \(effective.id), want \(wantedID)") }
-        if effectivePreset(effective).id != preset.id { problems.append("swap is not an involution at \(preset.id)") }
-        if effective.kind != preset.kind || effective.rects != preset.rects {
-            problems.append("\(effective.id) differs from \(preset.id)")
-        }
-    }
-    report("SM auto-swap", stageManagerEnabled ? "Stage Manager on: full-width applies as -sm and back"
-                                               : "Stage Manager off: presets apply as-is", problems)
 }
 
 // Every other on-screen layer-0 window (the only layer the engine ever acts on), snapshotted once
@@ -625,10 +578,7 @@ guard send("show 3") else { bail("helper control", "no reply to show 3") }
 let singleTargets = Array(testWindows.prefix(3))
 var landed: [String: CGRect] = [:]  // preset id → TW1 frame after apply
 
-for requested in PresetLibrary.all where requested.kind != .arrange {
-    // The engine applies the width variant matching the Stage Manager state (SPEC §1 auto-swap);
-    // every expectation below is computed for that effective preset, keyed by the requested id.
-    let preset = effectivePreset(requested)
+for preset in PresetLibrary.all where preset.kind != .arrange {
     let area = usableArea(for: preset)
     for window in singleTargets {
         var problems: [String] = []
@@ -636,9 +586,9 @@ for requested in PresetLibrary.all where requested.kind != .arrange {
         let before = frame(window)
         let bystanders = singleTargets.filter { $0.number != window.number }.map { ($0, frame($0)) }
 
-        let result = engine.apply(preset: requested, hoveredWindow: window.element, screen: screen)
+        let result = engine.apply(preset: preset, hoveredWindow: window.element, screen: screen)
         let after = frame(window)
-        if window.number == 1 { landed[requested.id] = after }
+        if window.number == 1 { landed[preset.id] = after }
         let target = preset.rect.map(area.frame(for:)) ?? area.centeredFrame(size: before.size)
         let want = expected(window, target: target, unit: preset.rect, area: area, sizeBefore: before.size)
         let error = edgeError(after, want)
@@ -668,16 +618,14 @@ for requested in PresetLibrary.all where requested.kind != .arrange {
         if revertError > 1 { problems.append("revert got \(describe(reverted)) want \(describe(before))") }
         if engine.hasHistory(window.element) { problems.append("history kept after revert") }
         let note = result.moves.first?.realigned == true ? "re-aligned" : ""
-        report(requested.id, window.label, problems, maxError: max(error, revertError), note: note)
+        report(preset.id, window.label, problems, maxError: max(error, revertError), note: note)
     }
 }
 
-// Neighbouring single-window presets of one width variant touch: e.g. left-half ends exactly
-// where right-half starts, and right-edge presets end at visibleFrame.maxX (TW1 frames). The
-// groups are the EFFECTIVE variants (the Stage Manager auto-swap decides which frames an
-// applied preset gets), so this checks the layout the engine really produced.
+// Neighbouring single-window presets of one width variant touch: e.g. left-half-sm ends exactly
+// where right-half-sm starts, and right-edge presets end at visibleFrame.maxX (TW1 frames).
 for stageManager in [false, true] {
-    let presets = PresetLibrary.all.filter { $0.kind == .moveResize && isStageManagerVariant(effectivePreset($0)) == stageManager }
+    let presets = PresetLibrary.all.filter { $0.kind == .moveResize && isStageManagerVariant($0) == stageManager }
     let placed = presets.filter { landed[$0.id] != nil }
     let problems = touching(placed.compactMap(\.rect), placed.compactMap { landed[$0.id] },
                             names: placed.map(\.id), tolerance: 0.5)
@@ -733,11 +681,7 @@ func stagingFrame(for window: TestWindow, near slot: CGRect) -> CGRect {
 /// `hoveredWindow: nil` and must keep the front-most windows in plain z-order.
 /// `stageHoveredFar` = TW1 is staged far from the primary slot yet must still land there (SPEC §1
 /// position-independence proof: the pin overrides cost).
-func runArrange(_ requested: Preset, visibleCount: Int, withTarget: Bool = true, stageHoveredFar: Bool = false) {
-    // SPEC §1 "Stage Manager auto-swap": the engine applies the width variant matching the Stage
-    // Manager state; slots, areas and expectations are computed for that effective preset, and
-    // the requested preset is what the engine is called with.
-    let preset = effectivePreset(requested)
+func runArrange(_ preset: Preset, visibleCount: Int, withTarget: Bool = true, stageHoveredFar: Bool = false) {
     let area = usableArea(for: preset)
     let slots = area.slotFrames(for: preset)
     let slotCount = slots.count
@@ -755,7 +699,7 @@ func runArrange(_ requested: Preset, visibleCount: Int, withTarget: Bool = true,
         + (stageHoveredFar ? ", TW1 staged far from the primary slot" : "")
     var problems: [String] = variantProblems
     guard send("show \(visibleCount)") else {
-        report(requested.id, scenario, ["helper did not confirm show \(visibleCount)"])
+        report(preset.id, scenario, ["helper did not confirm show \(visibleCount)"])
         return
     }
     let visibleWindows = Array(testWindows.prefix(visibleCount))
@@ -772,7 +716,7 @@ func runArrange(_ requested: Preset, visibleCount: Int, withTarget: Bool = true,
     // the remaining kept windows are staged near their own shuffled slots among the rest.
     // A constrained window takes the first shuffled slot its staging frame fits around without
     // leaving the usable area (else the OS would push it towards a neighbouring slot).
-    var order = shuffled(slotCount, seed: "\(requested.id)/\(visibleCount)")
+    var order = shuffled(slotCount, seed: "\(preset.id)/\(visibleCount)")
     var intended: [Int: Int] = [:]  // window number → staged slot (prediction is derived below)
     let stagedOthers = withTarget ? keptOthers : kept
     if withTarget {
@@ -832,7 +776,7 @@ func runArrange(_ requested: Preset, visibleCount: Int, withTarget: Bool = true,
         }
     }
 
-    let result = engine.apply(preset: requested, hoveredWindow: target, screen: screen)
+    let result = engine.apply(preset: preset, hoveredWindow: target, screen: screen)
 
     // Predicted assignment, derived here from the SPEC §1 rules with the harness's own cost()
     // and min-cost solver (independent of the engine): with a target the hovered TW1 is pinned
@@ -901,12 +845,12 @@ func runArrange(_ requested: Preset, visibleCount: Int, withTarget: Bool = true,
         problems.append("history kept after revert")
     }
     let realigned = result.moves.filter(\.realigned).count
-    report(requested.id, scenario, problems, maxError: max(maxError, revertError),
+    report(preset.id, scenario, problems, maxError: max(maxError, revertError),
            note: realigned > 0 ? "\(realigned) re-aligned" : "")
 }
 
-for requested in PresetLibrary.all where requested.kind == .arrange {
-    let slotCount = requested.slots.count
+for preset in PresetLibrary.all where preset.kind == .arrange {
+    let slotCount = preset.slots.count
     // Fewer-windows-than-slots coverage: every arrange preset is additionally applied with
     // exactly 1 and exactly 2 visible windows. For k ≤ 2 those coincide with the k−1 / k
     // scenarios above, so they are added for k > 2 only (deduplicated, so a k = 3 preset where
@@ -916,12 +860,12 @@ for requested in PresetLibrary.all where requested.kind == .arrange {
     var ran = Set<Int>()
     for visibleCount in counts where (1...windowCount).contains(visibleCount) {
         guard ran.insert(visibleCount).inserted else { continue }
-        runArrange(requested, visibleCount: visibleCount)
+        runArrange(preset, visibleCount: visibleCount)
         // SPEC §1 position-independence proof: TW1 staged far from the primary slot still takes
         // it. The 1+3 case is the regression that motivated the rule (ninja, 1 Oct 2026: with
         // pure min-cost his hovered mid-size window went to a small right slot).
-        if requested.id == "arrange-1+3", visibleCount == 4 {
-            runArrange(requested, visibleCount: visibleCount, stageHoveredFar: true)
+        if preset.id == "arrange-1+3", visibleCount == 4 {
+            runArrange(preset, visibleCount: visibleCount, stageHoveredFar: true)
         }
     }
 }
@@ -1160,11 +1104,11 @@ if send("show 3") {
     }
 
     // The captured element drives the engine like the hovered one.
-    if let focused = awaitFocusedWindow(windows[0]), let requested = PresetLibrary.preset(id: "left-half") {
+    if let focused = awaitFocusedWindow(windows[0]), let preset = PresetLibrary.preset(id: "left-half") {
         var problems: [String] = []
         let before = frame(windows[0])
-        let result = engine.apply(preset: requested, hoveredWindow: focused, screen: screen)
-        let want = usableArea(for: effectivePreset(requested)).frame(for: requested.rect!)
+        let result = engine.apply(preset: preset, hoveredWindow: focused, screen: screen)
+        let want = usableArea(for: preset).frame(for: preset.rect!)
         let error = edgeError(frame(windows[0]), want)
         if result.moves.count != 1 || error > 1 { problems.append("got \(describe(frame(windows[0]))) want \(describe(want))") }
         if !engine.revert(focused) || edgeError(frame(windows[0]), before) > 1 { problems.append("revert failed") }

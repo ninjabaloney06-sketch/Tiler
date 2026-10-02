@@ -15,10 +15,8 @@ import TilerTestSupport
 // true) and TILER_ONLY_PIDS=<helper pid>, so Tiler can only touch the test windows. Then, with
 // HID-posted events (every click is hit-tested first and must land on Tiler; the cursor is
 // restored and Tiler/the helper are killed on every exit path):
-// Expected frames go through the Stage Manager auto-swap (SPEC §1, one choke point in
-// AXWindowEngine.apply): with Stage Manager on the engine applies every palette preset as its
-// `-sm` variant, detected read-only here via CFPreferences (GloballyEnabled,
-// com.apple.WindowManager) — the palette wells keep holding full-width ids.
+// Tiler runs with TILER_NO_ANIMATE set (the engine's glide, SPEC §3, is off — expected frames
+// are read exact, with no timing dependence).
 //   1. moving the cursor onto TW1's green button shows the palette within hoverDelay + 150 ms,
 //      and the native menu (CGWindowList owner ThemeWidgetControlViewService, layer 101) never
 //      appears within 4 s;
@@ -283,33 +281,7 @@ place(startFrame2, title: "TW2")
 _ = raiseHelper()
 report("helper", [], note: "pid \(helperPID), TW1 \(describe(frameOfTW())), frontmost")
 
-// Stage Manager state, read here independently of the engine (SPEC §1 "Stage Manager
-// auto-swap"): `GloballyEnabled` in the `com.apple.WindowManager` domain, read-only — never
-// written. The engine applies every preset as its other width variant while this is on.
-let stageManagerEnabled: Bool = {
-    let domain = "com.apple.WindowManager" as CFString
-    CFPreferencesAppSynchronize(domain)
-    guard let raw = CFPreferencesCopyAppValue("GloballyEnabled" as CFString, domain) else { return false }
-    if CFGetTypeID(raw) == CFBooleanGetTypeID() { return raw as! Bool }
-    if let number = raw as? NSNumber { return number.boolValue }
-    if let text = raw as? String { return text == "1" || text == "true" }
-    return false
-}()
-
-/// The id whose frame the engine really produces for a palette preset (SPEC §1 "Stage Manager
-/// auto-swap", one choke point in `AXWindowEngine.apply`): with Stage Manager on a full-width
-/// preset applies as its `-sm` variant and a `-sm` preset as its full-width counterpart; without,
-/// as-is. Own suffix surgery (the tiler-harness and tiler-palettetest do the same), so the
-/// expectation does not reuse the engine's helper.
-func effectiveID(_ id: String) -> String {
-    guard stageManagerEnabled, let preset = PresetLibrary.preset(id: id) else { return id }
-    let swapped = preset.isStageManagerVariant
-        ? String(preset.id.dropLast(Preset.stageManagerIDSuffix.count))
-        : preset.id + Preset.stageManagerIDSuffix
-    return PresetLibrary.preset(id: swapped)?.id ?? id
-}
-
-func expectedFrame(_ id: String) -> CGRect { TilerTestSupport.expectedFrame(effectiveID(id), screen: screen) }
+func expectedFrame(_ id: String) -> CGRect { TilerTestSupport.expectedFrame(id, screen: screen) }
 
 /// The green button element + its current AX frame + its center in AX/CG space (top-left origin,
 /// y down — the space `AXUIElementCopyElementAtPosition` and `CGEvent(mouseCursorPosition:)` both
@@ -352,6 +324,7 @@ func launchTiler(hatAlpha: Double? = nil) {
     process.arguments = ["--config", configURL.path]
     var environment = ProcessInfo.processInfo.environment
     environment[WindowEnumerator.pidFilterVariable] = "\(helperPID)"
+    environment[FrameSetter.noAnimateVariable] = "1"
     environment["TILER_HAT_ALPHA"] = hatAlpha.map { "\($0)" }
     process.environment = environment
     process.standardOutput = FileHandle.nullDevice

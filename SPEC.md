@@ -109,17 +109,13 @@ In a `-sm` variant the ONLY free space is the inset strip on the left; the layou
 as full width, just scaled horizontally into `width − inset` — windows still touch each other
 and the top/right/bottom screen edges.
 
-**Stage Manager auto-swap (ninja, 1 Oct 2026).** At apply time the engine resolves the variant
-matching the CURRENT Stage Manager state: with Stage Manager on, a full-width preset is applied
-as its `-sm` counterpart and a `-sm` preset as its full-width counterpart; with Stage Manager
-off, presets apply as-is. One choke point: `AXWindowEngine.apply` — so palette, hotkey, hover
-trigger and test harnesses all get the swap while the palette wells keep holding full-width ids
-(windows would otherwise tile under the strip, while macOS's own layouts adapt). Stage Manager
-is detected read-only via CFPreferences (`GloballyEnabled` key, `com.apple.WindowManager`
-domain); Tiler never writes defaults. Presets without a counterpart in the library (Center,
-custom presets) pass through unchanged. The Settings editor's "Full width / Stage Manager"
-switch is editorial only. With Stage Manager permanently on (this Mac), the practical effect is
-that full-width presets gain the 72 pt inset on the left.
+**Stage Manager and tiling (measured, 2 Oct 2026).** macOS's own tiling does NOT reserve the
+strip zone — native Fill (Window menu → Move & Resize → Fill) with Stage Manager on fills the
+full `visibleFrame` (measured on a TextEdit window: 0,34,1470×849 on 2 Oct 2026); the strip
+draws above tiled windows. Tiler matches: presets apply their literal geometry; the `-sm`
+variants exist for explicit choice when ninja wants the strip area kept free. (Superseded: the
+1 Oct 2026 auto-swap idea — applying the variant matching the live Stage Manager state — is
+removed; it contradicted the measured native behavior.)
 
 **No gaps between windows (ninja, 22 Sep 2026).** Window edges touch: gap is fixed at 0 and
 there is no gap control in the UI (the core may keep its gap parameter, always 0).
@@ -151,12 +147,23 @@ palette (⌘ held at hover = macOS menu), with an option to invert; launch at lo
 ## 3. Window engine (Accessibility)
 
 One `@MainActor` class does all AX IPC. Messaging timeout 0.1 s on every element touched
-(hit-test on system-wide element 0.05–0.1 s). Set frame = size → position → size, with
+(hit-test on system-wide element 0.05–0.1 s). Set frame = glide → size → position → size, with
 `AXEnhancedUserInterface` switched off on the app element before and restored after (not
 restored for Chromium-family bundle ids, per Rectangle's "automatic" policy). Read the frame
 back; if it differs by > 1 pt (min-size / fixed-aspect windows), re-align inside the target
 (anchor edges the slot shares with the usable area, else center) and nudge back on screen.
-Skip non-settable sizes for resize (move only). Never AX-touch our own windows. No animation.
+Skip non-settable sizes for resize (move only; those windows do not glide — their final
+position is only known after the size is read). Never AX-touch our own windows.
+
+**Glide (ninja, 2 Oct 2026: windows should move like macOS's native animations).** Before the
+exact set, a resizable window glides from its current frame to the target: ~0.2 s, ease-in-out
+(smoothstep), 10 interpolation steps at whole-point frames, one AX size + position set per
+step; a failed or slow step is skipped, never aborts the move (added wall time bounded
+≤ 0.35 s). The exact final set and the readback/re-align always follow, so landed frames are
+exact. Skipped while the env `TILER_NO_ANIMATE` is set (same pattern as `TILER_ONLY_PIDS`,
+read per move): tiler-harness sets it for its in-process engine; tiler-palettetest and
+tiler-hovertest pass it to the spawned Tiler.
+
 **Revert:** remember each moved window's previous frame (keyed by CGWindowID via
 `@_silgen_name("_AXUIElementGetWindow")`, fallback pid+frame); a Revert icon appears at the
 palette's far left when the hovered window (or the last arrange) has history; clicking it
@@ -322,8 +329,7 @@ later components only fill their own directories. Interface contracts:
 - `PaletteController.shared.start(config: ConfigStore)` / `.stop()` — called by AppDelegate.
 - `ConfigStore` publishes changes (e.g. `NotificationCenter` name `.tilerConfigDidChange` or an
   `@Observable` model) so the palette and editor stay in sync.
-- `AXWindowEngine.apply(preset:, hoveredWindow:, screen:)` executes any preset, after resolving
-  the Stage Manager auto-swap of the preset (§1).
+- `AXWindowEngine.apply(preset:, hoveredWindow:, screen:)` executes any preset.
 
 ## 8. Quality bar (what critics judge against)
 
@@ -334,7 +340,9 @@ later components only fill their own directories. Interface contracts:
   correct. Assignment is optimal (compare to brute force for n ≤ 7).
 - Window engine: `tiler-harness` moves TilerTestWindows windows through every preset; every
   resizable window lands within 1 pt per edge; closest-slot assignment observed; revert
-  restores ≤ 1 pt; ninja's windows untouched (verify frames of other apps before/after).
+  restores ≤ 1 pt; ninja's windows untouched (verify frames of other apps before/after). Moves
+  glide (~0.2 s ease-in-out, exact final frame + readback, §3); the harness runs with
+  `TILER_NO_ANIMATE` set, so landed frames stay exact and timing-free.
 - Triggers: clicking the status item (HID click at its frame) with a TilerTestWindows window
   frontmost shows the palette under the icon within 150 ms with header "TilerTestWindows — TW1";
   clicking a preset moves that window; the frontmost app never changes. Hotkey ⌃⌥T (HID-posted)
@@ -359,7 +367,8 @@ later components only fill their own directories. Interface contracts:
 
 Per-preset hotkeys, URL scheme (`tiler://apply/<id>`, candidate for v1.1), interactive grid picker, ⌥ alternate layer, drag-to-display arrows,
 folders/chains, snap-to-edge, multiple-display special cases beyond "use the hovered
-window's screen", animation, Moom import.
+window's screen", Moom import. (Superseded: the simple apply-time glide moved INTO scope
+2 Oct 2026 — §3.)
 
 ## 10. Additions (ninja, 24 Sep 2026)
 

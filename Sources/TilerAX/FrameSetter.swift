@@ -4,11 +4,16 @@ import TilerCore
 
 /// Sets one window's frame through AX (SPEC §3). All frames are in AX space.
 ///
-/// Sequence: `AXEnhancedUserInterface` off on the app element (if it was on) → size → position
-/// → size → read back. If any edge is off by more than 1 pt (min-size / fixed-aspect / fixed-size
+/// Sequence: `AXEnhancedUserInterface` off on the app element (if it was on) → glide → size →
+/// position → size → read back. The glide (ninja, 2 Oct 2026: windows should move like macOS's
+/// native animations) interpolates from the window's current frame to the target over ~0.2 s
+/// with an ease-in-out curve (10 steps, whole-point frames, AX position+size set per step) and
+/// is skipped while `TILER_NO_ANIMATE` is set (the live-test tools run with it set). If any
+/// edge is off by more than 1 pt after the exact set (min-size / fixed-aspect / fixed-size
 /// windows), the window keeps the size the app allowed and is re-aligned with `alignedFrame`,
 /// then read back again. Enhanced UI is restored afterwards except for Chromium-family apps
-/// (Rectangle's "automatic" policy). Windows whose size is not settable are only moved.
+/// (Rectangle's "automatic" policy). Windows whose size is not settable are only moved (no
+/// glide — their final position is only known after the size is read).
 public enum FrameSetter {
     /// Which edges of a target lie on the usable area's border. Drives the re-align rule.
     public struct Edges: OptionSet, Sendable {
@@ -45,6 +50,45 @@ public enum FrameSetter {
     /// Differences up to this many points count as "landed" (macOS shortens a size change onto
     /// the Dock edge by 1 pt; Rectangle ignores that too).
     public static let tolerance: CGFloat = 1
+
+    /// Environment variable that switches the glide off (SPEC §3): set = windows jump instantly
+    /// to the final frame. Same pattern as `TILER_ONLY_PIDS` — the live-test tools set it so
+    /// their frame checks read exact frames without timing dependence (tiler-harness for its
+    /// in-process engine; tiler-palettetest and tiler-hovertest pass it to the spawned Tiler).
+    public static let noAnimateVariable = "TILER_NO_ANIMATE"
+
+    /// True while `TILER_NO_ANIMATE` is set, read on every move (the harness sets it at runtime).
+    static var animationDisabled: Bool { getenv(noAnimateVariable) != nil }
+
+    /// Duration of one glide (SPEC §3) and its step count: ~0.2 s over 10 steps keeps the added
+    /// wall time per move far under the 0.35 s bound even with one slow (timeout-length) set.
+    static let glideDuration: TimeInterval = 0.2
+    static let glideSteps = 10
+
+    /// Interpolates `window` from its current frame to `target` (SPEC §3 "Glide"): ease-in-out
+    /// (smoothstep) over `glideSteps` whole-point frames, one AX size + position set per step,
+    /// timed against a shared deadline so the sets spread evenly over `glideDuration`. A failed
+    /// or slow intermediate set never aborts the move — the step is skipped and the loop ends
+    /// past the deadline; the exact final set in `setFrame` always follows.
+    static func glide(_ window: AXUIElement, to target: CGRect) {
+        guard !animationDisabled, let start = AX.frame(window), start != target else { return }
+        let began = Date()
+        for step in 1...glideSteps {
+            let t = Double(step) / Double(glideSteps)
+            let due = began.addingTimeInterval(glideDuration * t)
+            let remaining = due.timeIntervalSinceNow
+            if remaining > 0 { Thread.sleep(forTimeInterval: remaining) }
+            guard Date().timeIntervalSince(began) <= glideDuration + 0.05 else { break }
+            let eased = t * t * (3 - 2 * t)
+            let frame = CGRect(
+                x: (start.minX + (target.minX - start.minX) * eased).rounded(),
+                y: (start.minY + (target.minY - start.minY) * eased).rounded(),
+                width: (start.width + (target.width - start.width) * eased).rounded(),
+                height: (start.height + (target.height - start.height) * eased).rounded())
+            if !AX.setSize(window, frame.size) { continue }  // failed step: try the next one
+            AX.setPosition(window, frame.origin)
+        }
+    }
 
     /// Chromium-family bundle id prefixes (Rectangle `EnhancedUI.automatic`): Enhanced UI is not
     /// switched back on for these after a move.
@@ -122,6 +166,7 @@ public enum FrameSetter {
         // A failed settable query counts as resizable (Rectangle does the same).
         let sizeSettable = AX.isSettable(window, kAXSizeAttribute) ?? true
         if sizeSettable {
+            glide(window, to: target)
             AX.setSize(window, target.size)
             AX.setPosition(window, target.origin)
             AX.setSize(window, target.size)

@@ -1,8 +1,25 @@
 # Tiler
 
-A personal Moom-style window manager for macOS. Click the Tiler icon in the menu bar or press
-⌃⌥T, and a palette of layouts drops down. Click an icon to move and resize the front window,
-or to arrange every window on its screen. Tiler lives in the menu bar only.
+A native **macOS window manager** that lives in the menu bar — a fast, personal
+[Moom](https://manytricks.com/moom/) alternative built with **Swift 6** and the **Accessibility
+API**. Click the Tiler icon in the menu bar (or press ⌃⌥T) and a palette of layouts drops
+down: move and resize the front window, or arrange every window on the screen into grids and
+splits. No Dock icon, no background daemons, no configuration files to hand-edit.
+
+| Palette (light) | Palette (dark) | Settings |
+|---|---|---|
+| ![Tiler palette, light mode](.github/assets/palette-light.png) | ![Tiler palette, dark mode](.github/assets/palette-dark.png) | ![Tiler settings editor](.github/assets/editor.png) |
+
+## Highlights
+
+- **28 move & resize presets + 28 arrange layouts** — halves, thirds, quarters, 3×2–4×4
+  grids, 1+3/2+3/1+4 splits; every layout in a full-width and a Stage-Manager variant.
+- **Native macOS feel** — native-size palette at Apple's exact menu metrics, green-button
+  hover trigger with the ⌘ rule, animated window glides, light and dark mode.
+- **Full editor** — an 11×6 drag-and-drop palette grid with live glass preview, per-preset
+  hotkeys, adjustable Stage Manager inset.
+- **Quality bar** — 239-check live harness, pixel-measured native metrics, zero-warning
+  Swift 6 build.
 
 ## First run
 

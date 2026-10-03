@@ -1,6 +1,6 @@
 #!/bin/bash
-# Installs Tiler (SPEC §6): release build, copy to ~/Applications/Tiler.app, quit a running
-# copy, open the installed one. Grant Accessibility to ~/Applications/Tiler.app only.
+# Installs Tiler (SPEC §6): release build, copy to ~/Applications/Tiler.app (the build copy in
+# the repo is removed), quit a running copy, open the installed one. Grant Accessibility to ~/Applications/Tiler.app only.
 #
 #   scripts/install.sh [build.sh options, e.g. --scratch-path <dir>]
 set -euo pipefail
@@ -27,6 +27,8 @@ mkdir -p "$HOME/Applications"
 # Replace, not merge: a stale file left inside the bundle would break its signature.
 rm -rf "$DEST"
 ditto "$SRC" "$DEST"
+# Drop the build copy so only the installed app exists (Spotlight/Launchpad list every bundle).
+case "$SRC" in "$ROOT"/*) rm -rf "$SRC" ;; esac
 
 echo "==> opening $DEST"
 open "$DEST"

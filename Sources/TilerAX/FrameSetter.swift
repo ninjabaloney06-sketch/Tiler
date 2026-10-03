@@ -65,28 +65,50 @@ public enum FrameSetter {
     static let glideDuration: TimeInterval = 0.2
     static let glideSteps = 10
 
-    /// Interpolates `window` from its current frame to `target` (SPEC §3 "Glide"): ease-in-out
-    /// (smoothstep) over `glideSteps` whole-point frames, one AX size + position set per step,
-    /// timed against a shared deadline so the sets spread evenly over `glideDuration`. A failed
-    /// or slow intermediate set never aborts the move — the step is skipped and the loop ends
-    /// past the deadline; the exact final set in `setFrame` always follows.
-    static func glide(_ window: AXUIElement, to target: CGRect) {
-        guard !animationDisabled, let start = AX.frame(window), start != target else { return }
+    /// One window of a `setFrames` batch.
+    public struct Request {
+        public let window: AXUIElement
+        public let target: CGRect
+        public let sharedEdges: Edges
+
+        public init(window: AXUIElement, target: CGRect, sharedEdges: Edges) {
+            self.window = window
+            self.target = target
+            self.sharedEdges = sharedEdges
+        }
+    }
+
+    /// Interpolates every `(window, start, target)` together (SPEC §3 "Glide"): ease-in-out
+    /// (smoothstep) at whole-point frames, one AX size + position set per window per step, all
+    /// windows on the same frame of the curve (ninja, 3 Oct 2026: an arrange glides as one
+    /// motion, not window after window). Each step's curve position comes from the elapsed time,
+    /// so slow sets (many windows of one app) mean fewer steps, never a longer glide; at most
+    /// `glideSteps` steps, ending past `glideDuration`. A failed set skips that window for the
+    /// step; the exact final set in `setFrames` always follows.
+    static func glide(_ moves: [(window: AXUIElement, start: CGRect, target: CGRect)]) {
+        let moves = moves.filter { $0.start != $0.target }
+        guard !animationDisabled, !moves.isEmpty else { return }
         let began = Date()
-        for step in 1...glideSteps {
-            let t = Double(step) / Double(glideSteps)
-            let due = began.addingTimeInterval(glideDuration * t)
+        let interval = glideDuration / Double(glideSteps)
+        var step = 0
+        while step < glideSteps {
+            step += 1
+            let due = began.addingTimeInterval(interval * Double(step))
             let remaining = due.timeIntervalSinceNow
             if remaining > 0 { Thread.sleep(forTimeInterval: remaining) }
-            guard Date().timeIntervalSince(began) <= glideDuration + 0.05 else { break }
+            let t = min(1, Date().timeIntervalSince(began) / glideDuration)
+            guard t < 1 else { break }
             let eased = t * t * (3 - 2 * t)
-            let frame = CGRect(
-                x: (start.minX + (target.minX - start.minX) * eased).rounded(),
-                y: (start.minY + (target.minY - start.minY) * eased).rounded(),
-                width: (start.width + (target.width - start.width) * eased).rounded(),
-                height: (start.height + (target.height - start.height) * eased).rounded())
-            if !AX.setSize(window, frame.size) { continue }  // failed step: try the next one
-            AX.setPosition(window, frame.origin)
+            for move in moves {
+                let (start, target) = (move.start, move.target)
+                let frame = CGRect(
+                    x: (start.minX + (target.minX - start.minX) * eased).rounded(),
+                    y: (start.minY + (target.minY - start.minY) * eased).rounded(),
+                    width: (start.width + (target.width - start.width) * eased).rounded(),
+                    height: (start.height + (target.height - start.height) * eased).rounded())
+                if !AX.setSize(move.window, frame.size) { continue }  // failed step: next window
+                AX.setPosition(move.window, frame.origin)
+            }
         }
     }
 
@@ -150,41 +172,89 @@ public enum FrameSetter {
     public static func setFrame(
         _ target: CGRect, of window: AXUIElement, sharedEdges: Edges, bounds: CGRect?, scale: CGFloat
     ) -> Result {
-        AX.prepare(window)
-        let pid = AX.pid(window)
-        let app = pid.map { AX.application(pid: $0) }
+        setFrames([Request(window: window, target: target, sharedEdges: sharedEdges)],
+                  bounds: bounds, scale: scale)[0]
+    }
+
+    /// Moves/resizes every request's window to its target (see type doc): the resizable windows
+    /// glide together, then each gets the exact set, readback and re-align. Results are in
+    /// request order.
+    public static func setFrames(_ requests: [Request], bounds: CGRect?, scale: CGFloat) -> [Result] {
         let enhancedUI = "AXEnhancedUserInterface"
-        let enhancedWasOn = app.flatMap { AX.bool($0, enhancedUI) } == true
-        if enhancedWasOn, let app { AX.set(app, enhancedUI, NSNumber(value: false)) }
+        var enhancedOff: [pid_t: AXUIElement] = [:]
+        var sizeSettable: [Bool] = []
+        for request in requests {
+            AX.prepare(request.window)
+            if let pid = AX.pid(request.window), enhancedOff[pid] == nil {
+                let app = AX.application(pid: pid)
+                if AX.bool(app, enhancedUI) == true {
+                    AX.set(app, enhancedUI, NSNumber(value: false))
+                    enhancedOff[pid] = app
+                }
+            }
+            // A failed settable query counts as resizable (Rectangle does the same).
+            sizeSettable.append(AX.isSettable(request.window, kAXSizeAttribute) ?? true)
+        }
         defer {
-            let bundleID = pid.flatMap { NSRunningApplication(processIdentifier: $0)?.bundleIdentifier }
-            if enhancedWasOn, let app, !isChromiumFamily(bundleID) {
-                AX.set(app, enhancedUI, NSNumber(value: true))
+            for (pid, app) in enhancedOff {
+                let bundleID = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+                if !isChromiumFamily(bundleID) { AX.set(app, enhancedUI, NSNumber(value: true)) }
             }
         }
 
-        // A failed settable query counts as resizable (Rectangle does the same).
-        let sizeSettable = AX.isSettable(window, kAXSizeAttribute) ?? true
-        if sizeSettable {
-            glide(window, to: target)
-            AX.setSize(window, target.size)
-            AX.setPosition(window, target.origin)
-            AX.setSize(window, target.size)
-        } else if let size = AX.size(window) {
-            let aligned = alignedFrame(size: size, in: target, sharedEdges: sharedEdges, bounds: bounds, scale: scale)
-            AX.setPosition(window, aligned.origin)
-        }
+        glide(requests.indices.compactMap { index in
+            let request = requests[index]
+            guard sizeSettable[index], let start = AX.frame(request.window) else { return nil }
+            return (request.window, start, request.target)
+        })
 
-        var final = AX.frame(window)
-        var realigned = false
-        if let actual = final, !matches(actual, target) {
-            let aligned = alignedFrame(size: actual.size, in: target, sharedEdges: sharedEdges, bounds: bounds, scale: scale)
-            if abs(aligned.minX - actual.minX) > 0.25 || abs(aligned.minY - actual.minY) > 0.25 {
+        return requests.indices.map { index in
+            let request = requests[index]
+            let (window, target) = (request.window, request.target)
+            if sizeSettable[index] {
+                AX.setSize(window, target.size)
+                AX.setPosition(window, target.origin)
+                AX.setSize(window, target.size)
+                if let actual = AX.frame(window), !sizesMatch(actual.size, target.size) {
+                    unstick(window, target: target, bounds: bounds)
+                }
+            } else if let size = AX.size(window) {
+                let aligned = alignedFrame(size: size, in: target, sharedEdges: request.sharedEdges,
+                                           bounds: bounds, scale: scale)
                 AX.setPosition(window, aligned.origin)
-                realigned = true
-                final = AX.frame(window)
             }
+
+            var final = AX.frame(window)
+            var realigned = false
+            if let actual = final, !matches(actual, target) {
+                let aligned = alignedFrame(size: actual.size, in: target, sharedEdges: request.sharedEdges,
+                                           bounds: bounds, scale: scale)
+                if abs(aligned.minX - actual.minX) > 0.25 || abs(aligned.minY - actual.minY) > 0.25 {
+                    AX.setPosition(window, aligned.origin)
+                    realigned = true
+                    final = AX.frame(window)
+                }
+            }
+            return Result(target: target, final: final, sizeSettable: sizeSettable[index], realigned: realigned)
         }
-        return Result(target: target, final: final, sizeSettable: sizeSettable, realigned: realigned)
+    }
+
+    static func sizesMatch(_ a: CGSize, _ b: CGSize) -> Bool {
+        abs(a.width - b.width) <= tolerance && abs(a.height - b.height) <= tolerance
+    }
+
+    /// Second try for a resizable window that kept a different size: AppKit ignores height
+    /// changes while a window's bottom edge sits within ~20 pt of a display edge that borders
+    /// another display (measured 3 Oct 2026, Terminal and TextEdit, external display stacked
+    /// above the built-in one; the glide's last steps park bottom-row windows exactly there, so
+    /// they kept one to four rows too many). The window is lifted to the top of `bounds` (else
+    /// of its target), resized there and put back. Apps that refuse the size for other reasons
+    /// (min size, resize increments) answer the same again; the re-align rule handles them.
+    static func unstick(_ window: AXUIElement, target: CGRect, bounds: CGRect?) {
+        let top = bounds?.minY ?? target.minY
+        AX.setPosition(window, CGPoint(x: target.minX, y: top))
+        AX.setSize(window, target.size)
+        AX.setPosition(window, target.origin)
+        AX.setSize(window, target.size)
     }
 }

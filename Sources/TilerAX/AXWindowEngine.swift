@@ -116,12 +116,17 @@ public final class AXWindowEngine {
             result.skippedReason = candidates.isEmpty ? "no candidate windows" : "empty plan"
             return result
         }
+        // All windows glide together (one FrameSetter batch), then each is recorded for Revert.
+        let requests = plan.map { step in
+            FrameSetter.Request(window: candidates[step.windowIndex].element, target: step.frame,
+                                sharedEdges: .shared(by: preset.slots[step.slotIndex]))
+        }
+        let sets = FrameSetter.setFrames(requests, bounds: area.rect, scale: area.scale)
         var keys: [RevertHistory.Key] = []
-        for step in plan {
+        for (step, set) in zip(plan, sets) {
             let window = candidates[step.windowIndex]
-            let unit = preset.slots[step.slotIndex]
-            let (moved, key) = move(window.element, pid: window.pid, windowID: window.windowID, slotIndex: step.slotIndex,
-                                    before: window.frame, target: step.frame, edges: .shared(by: unit), area: area)
+            let (moved, key) = record(set, window: window.element, pid: window.pid, windowID: window.windowID,
+                                      slotIndex: step.slotIndex, before: window.frame)
             result.moves.append(moved)
             keys.append(key)
         }
@@ -135,9 +140,17 @@ public final class AXWindowEngine {
         before: CGRect, target: CGRect, edges: FrameSetter.Edges, area: UsableArea
     ) -> (move: Move, key: RevertHistory.Key) {
         let set = FrameSetter.setFrame(target, of: window, sharedEdges: edges, bounds: area.rect, scale: area.scale)
-        let key = history.record(element: window, pid: pid, windowID: windowID, before: before, after: set.final ?? target)
+        return record(set, window: window, pid: pid, windowID: windowID, slotIndex: slotIndex, before: before)
+    }
+
+    /// Records a finished set for Revert; returns the move and its history key.
+    private func record(
+        _ set: FrameSetter.Result, window: AXUIElement, pid: pid_t, windowID: CGWindowID?, slotIndex: Int?,
+        before: CGRect
+    ) -> (move: Move, key: RevertHistory.Key) {
+        let key = history.record(element: window, pid: pid, windowID: windowID, before: before, after: set.final ?? set.target)
         let move = Move(element: window, pid: pid, windowID: windowID, slotIndex: slotIndex, before: before,
-                        target: target, final: set.final, sizeSettable: set.sizeSettable, realigned: set.realigned)
+                        target: set.target, final: set.final, sizeSettable: set.sizeSettable, realigned: set.realigned)
         return (move, key)
     }
 

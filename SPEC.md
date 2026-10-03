@@ -155,16 +155,21 @@ One `@MainActor` class does all AX IPC. Messaging timeout 0.1 s on every element
 (hit-test on system-wide element 0.05–0.1 s). Set frame = glide → size → position → size, with
 `AXEnhancedUserInterface` switched off on the app element before and restored after (not
 restored for Chromium-family bundle ids, per Rectangle's "automatic" policy). Read the frame
-back; if it differs by > 1 pt (min-size / fixed-aspect windows), re-align inside the target
+back; if a resizable window kept another size, lift it to the top of the usable area, set the size
+there and put it back (AppKit ignores height changes while a window's bottom edge is within
+~20 pt of a display edge bordering another display — measured 3 Oct 2026, Terminal and TextEdit,
+external display stacked above the built-in one; without this, 4x4 bottom-row windows kept 1–4
+extra rows); if it still differs by > 1 pt (min-size / fixed-aspect windows), re-align inside the target
 (anchor edges the slot shares with the usable area, else center) and nudge back on screen.
 Skip non-settable sizes for resize (move only; those windows do not glide — their final
 position is only known after the size is read). Never AX-touch our own windows.
 
 **Glide (ninja, 2 Oct 2026: windows should move like macOS's native animations).** Before the
 exact set, a resizable window glides from its current frame to the target: ~0.2 s, ease-in-out
-(smoothstep), 10 interpolation steps at whole-point frames, one AX size + position set per
-step; a failed or slow step is skipped, never aborts the move (added wall time bounded
-≤ 0.35 s). The exact final set and the readback/re-align always follow, so landed frames are
+(smoothstep), up to 10 interpolation steps at whole-point frames, one AX size + position set per
+window per step. All windows of an arrange glide together on the same curve (ninja, 3 Oct 2026),
+then each gets the exact set; the curve position comes from elapsed time, so slow apps get fewer
+steps, never a longer glide. A failed or slow step is skipped, never aborts the move. The exact final set and the readback/re-align always follow, so landed frames are
 exact. Skipped while the env `TILER_NO_ANIMATE` is set (same pattern as `TILER_ONLY_PIDS`,
 read per move): tiler-harness sets it for its in-process engine; tiler-palettetest and
 tiler-hovertest pass it to the spawned Tiler.

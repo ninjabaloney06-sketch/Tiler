@@ -45,6 +45,10 @@ import func TilerTestSupport.screenIsLocked
 //      `hoveredWindow: nil` keeps the front-most windows in plain z-order (checks as in 2);
 //   4. before/after snapshots of every other on-screen layer-0 window (all apps but the helper):
 //      CGWindowList bounds, or for Stage Manager strip thumbnails the AX frame, must not change.
+//      A window that left the screen while still existing at its old frame (its app hid or
+//      minimized it, Stage Manager strip churn, another space) does not fail the run — the engine
+//      sets frames and raises only enumerated helper windows and has no hide/close; a window that
+//      moved off-screen or vanished from the system entirely still fails.
 // Prints one table row per check and exits 1 on any failure. The helper is killed at the end on
 // every path (and exits on its own via --control EOF if this process dies), so its windows are on
 // screen only while the harness runs.
@@ -253,9 +257,11 @@ struct CGWindow {
     let bounds: CGRect
 }
 
-/// On-screen windows, front to back.
-func cgWindows() -> [CGWindow] {
-    let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+/// On-screen windows, front to back. With `allStates`, every window of every app regardless of
+/// on-screen state — used to check where a window that left the screen went.
+func cgWindows(allStates: Bool = false) -> [CGWindow] {
+    let options: CGWindowListOption = allStates ? [.excludeDesktopElements] : [.optionOnScreenOnly, .excludeDesktopElements]
+    let info = CGWindowListCopyWindowInfo(options, kCGNullWindowID)
         as? [[String: Any]] ?? []
     return info.compactMap { record in
         guard let id = (record[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
@@ -1167,9 +1173,11 @@ for window in testWindows { place(window, window.initial) }
 _ = settle(testWindows)
 var changed: [String] = []
 var missing: [String] = []
+var offScreenUnchanged = 0
 let othersDeadline = Date().addingTimeInterval(5)
 repeat {
     let now = otherWindows()
+    let everywhere = Dictionary(cgWindows(allStates: true).map { ($0.id, $0.bounds) }, uniquingKeysWith: { a, _ in a })
     changed = othersBefore.values.compactMap { old in
         guard let new = now[old.window.id] else { return nil }
         let name = "\(old.window.owner)#\(old.window.id)"
@@ -1181,13 +1189,34 @@ repeat {
         return edgeError(new.window.bounds, old.window.bounds) > 0.5
             ? "\(name) \(describe(old.window.bounds))→\(describe(new.window.bounds))" : nil
     }
-    missing = othersBefore.values.filter { now[$0.window.id] == nil }.map { "\($0.window.owner)#\($0.window.id)" }
+    // A window that left the screen but still exists at its old frame was hidden, minimized,
+    // moved to another space or into the Stage Manager strip by its own app or by the system —
+    // measured 4 Oct 2026: the Claude app's windows dropped off-screen mid-run (Stage Manager
+    // strip churn) and failed the check although the engine only ever sets frames and raises
+    // enumerated helper windows (TILER_ONLY_PIDS) and has no hide/close, so a frame that never
+    // changed cannot be its doing. Still a failure: a window that moved off-screen, and one that
+    // is gone from the system entirely.
+    missing = []
+    offScreenUnchanged = 0
+    for old in othersBefore.values where now[old.window.id] == nil {
+        let name = "\(old.window.owner)#\(old.window.id)"
+        guard let bounds = everywhere[old.window.id] else {
+            missing.append(name)
+            continue
+        }
+        if edgeError(bounds, old.stripFrame ?? old.window.bounds) > 0.5 {
+            missing.append("\(name) now at \(describe(bounds))")
+        } else {
+            offScreenUnchanged += 1
+        }
+    }
     if changed.isEmpty && missing.isEmpty { break }
     Thread.sleep(forTimeInterval: 0.1)
 } while Date() < othersDeadline
 let stripCount = othersBefore.values.filter(\.isStripWindow).count
 report("other windows untouched", "\(othersBefore.count) non-test windows",
        changed.map { "changed \($0)" } + missing.map { "gone \($0)" },
-       note: "\(othersBefore.count - stripCount) by CG bounds, \(stripCount) strip windows by AX frame")
+       note: "\(othersBefore.count - stripCount - offScreenUnchanged) by CG bounds, \(stripCount) strip windows by AX frame"
+           + (offScreenUnchanged > 0 ? ", \(offScreenUnchanged) off-screen at their old frames" : ""))
 
 finish()

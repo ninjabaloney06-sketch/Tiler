@@ -1,4 +1,9 @@
-# Tiler
+# Tiler — free, open-source window manager for macOS
+
+**Tiler is a free, open-source (MIT) window manager for macOS that tiles windows from the menu
+bar.** It snaps the front window to halves, thirds and quarters, and arranges every window on a
+screen into grids (2×2 up to 4×4) and split layouts in one click — a keyboard- and mouse-driven
+alternative to Moom, Rectangle and Magnet, written natively in Swift.
 
 A native **macOS window manager** that lives in the menu bar — a fast, personal
 [Moom](https://manytricks.com/moom/) alternative built with **Swift 6** and the **Accessibility
@@ -20,6 +25,13 @@ splits. No Dock icon, no background daemons, no configuration files to hand-edit
   hotkeys, adjustable Stage Manager inset.
 - **Quality bar** — 239-check live harness, pixel-measured native metrics, zero-warning
   Swift 6 build.
+
+## Requirements
+
+- macOS 14 Sonoma or later. Tested on Apple silicon; Intel Macs build from source but are untested.
+- Accessibility permission (Tiler moves windows through the Accessibility API).
+- To build: Xcode or the Swift 6.2 toolchain. There is no prebuilt download yet; `scripts/install.sh`
+  builds and installs it in one step.
 
 ## First run
 
@@ -114,3 +126,41 @@ The render flags draw headless 2× PNGs and exit. For `--render-palette`: `--hig
 shows the n-th preset (row by row, from 0) selected; `--header` sets the target line (default
 "TilerTestWindows — TW1"); `--no-target` renders the "No window" state with single-window
 presets dimmed; `--revert` renders with move history (a Revert well enabled, not dimmed).
+
+## FAQ
+
+### How do I tile windows on a Mac with Tiler?
+
+Click the Tiler icon in the menu bar or press ⌃⌥T, then pick a layout: a half, third or quarter
+for the front window, or an arrange layout (2×2, 3×3, 4×4, 1+3 …) for every window on that
+screen. Esc closes the palette; 1–9 apply a preset by its position.
+
+### Is Tiler free?
+
+Yes. Tiler is free and open source under the MIT license.
+
+### How is Tiler different from Moom, Rectangle and Magnet?
+
+- **Moom** (paid) is the model: a palette of layouts from the green button. Tiler is a free,
+  open-source take on that palette, with grid arrangements up to 4×4 and Stage Manager variants.
+- **Rectangle** (free) and **Magnet** (paid) are built mainly around keyboard shortcuts and a
+  menu of snap positions. Tiler puts every layout in one visual palette instead.
+
+### Does Tiler work with Stage Manager and multiple displays?
+
+Yes. Each layout has a Stage Manager variant that keeps the strip on the left free, and
+arrange layouts act on the screen of the target window. Windows that macOS refuses to resize
+at the edge between two stacked displays are moved clear, resized and put back.
+
+### Why does Tiler need Accessibility permission?
+
+macOS only lets apps move and resize other apps' windows through the Accessibility API. Tiler
+uses it for nothing else: no network access, no telemetry.
+
+### Can I use keyboard shortcuts?
+
+Yes. ⌃⌥T opens the palette, and every preset can get its own global hotkey in Settings.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

@@ -31,7 +31,7 @@ public struct WellBox: Hashable, Sendable {
 }
 
 /// The Moom-style palette editor model (SPEC §2): an 11 × 6 grid of wells, each holding at most
-/// one preset id, each preset in at most one well. The live palette is the bounding box of the
+/// one item id — a preset id or `revertID` — each item in at most one well. The live palette is the bounding box of the
 /// occupied wells; empty wells inside the box render as blank space.
 ///
 /// Operations mirror the editor's drag and drop (SPEC §5) and return whether anything changed.
@@ -39,8 +39,22 @@ public struct PaletteLayout: Hashable, Sendable {
     public static let columns = 11
     public static let rows = 6
 
-    /// Occupied wells → preset id.
+    /// Occupied wells → item id (a preset id or `revertID`).
     public private(set) var wells: [WellPosition: String]
+
+    /// The reserved well id of the Revert item (SPEC §3): placed, moved and removed like a
+    /// preset, but not a `PresetLibrary` preset — it restores the frames from before the last move.
+    public static let revertID = "revert"
+
+    /// True for an id a well may hold: a library preset or `revertID`.
+    public static func isPlaceable(_ id: String) -> Bool {
+        id == revertID || PresetLibrary.preset(id: id) != nil
+    }
+
+    /// The display name of a placeable id (tooltips, editor labels); nil for an unknown id.
+    public static func name(of id: String) -> String? {
+        id == revertID ? "Revert" : PresetLibrary.preset(id: id)?.name
+    }
 
     /// An empty layout.
     public init() {
@@ -112,6 +126,25 @@ public struct PaletteLayout: Hashable, Sendable {
         return position
     }
 
+    /// Places Revert for a layout saved before it became a well item (SPEC §2 migration): in the
+    /// well left of the palette's top-left well — where the fixed Revert column used to sit —
+    /// else the first empty well in reading order. No-op if Revert is placed or the palette is
+    /// empty.
+    public mutating func placeRevertIfMissing() {
+        guard position(of: Self.revertID) == nil, let box = boundingBox else { return }
+        let left = WellPosition(row: box.minRow, column: box.minColumn - 1)
+        if left.isValid, wells[left] == nil {
+            wells[left] = Self.revertID
+            return
+        }
+        for row in 0..<Self.rows {
+            for column in 0..<Self.columns where wells[WellPosition(row: row, column: column)] == nil {
+                wells[WellPosition(row: row, column: column)] = Self.revertID
+                return
+            }
+        }
+    }
+
     /// Bounding box of the occupied wells; nil when the palette is empty.
     public var boundingBox: WellBox? {
         guard !wells.isEmpty else { return nil }
@@ -180,7 +213,7 @@ public struct PaletteLayout: Hashable, Sendable {
 
 /// Persisted as a row-major array of `{"id", "row", "column"}` objects. Decoding keeps the first
 /// valid entry per well and per preset and drops entries that are malformed, outside the grid,
-/// or name an id that is not in `PresetLibrary` (SPEC §2: unknown ids ignored).
+/// or name an id that is neither in `PresetLibrary` nor `revertID` (SPEC §2: unknown ids ignored).
 extension PaletteLayout: Codable {
     private struct Entry: Encodable {
         let id: String
@@ -209,7 +242,7 @@ extension PaletteLayout: Codable {
         self.init()
         for entry in entries {
             guard let id = entry.id, let row = entry.row, let column = entry.column,
-                  PresetLibrary.preset(id: id) != nil else { continue }
+                  Self.isPlaceable(id) else { continue }
             let position = WellPosition(row: row, column: column)
             guard position.isValid, wells[position] == nil, self.position(of: id) == nil else { continue }
             wells[position] = id

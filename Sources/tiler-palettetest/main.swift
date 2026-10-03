@@ -23,7 +23,8 @@ import TilerTestSupport
 //   2. hotkey ⌃⌥T → palette within 150 ms, centered on TW1; → → ↓ → select left-half, right-half (blank
 //      skipped), arrange-2x1, bottom-half (blank skipped); Return applies; "3" applies Fill;
 //      Esc closes; ⌘Q closes the palette without reaching Tiler's menu; the hotkey again closes;
-//   3. Revert: the icon is shown after a move and restores TW1's frame;
+//   1 also: the Revert well is dimmed before any move;
+//   3. Revert: the Revert well is enabled after a move and a click restores TW1's frame;
 //   4. no target (TW1 has a sheet): header "No window", single-window presets disabled and
 //      inert, arrange 2x1 lays out TW1 + TW2; hotkey palette centered on the mouse's screen, keys
 //      reach only the arrange preset, a disabled preset's digit does nothing;
@@ -545,6 +546,9 @@ let testLayout: PaletteLayout = {
     let wells: [(Int, Int, String)] = [
         (0, 0, "left-half"), (0, 2, "right-half"), (0, 3, "fill"),
         (1, 0, "top-half"), (1, 1, "arrange-2x1"), (1, 3, "bottom-half"),
+        // Revert is a well item (SPEC §3); at the end of row 1 it leaves every arrow/digit path
+        // below unchanged.
+        (1, 4, PaletteLayout.revertID),
     ]
     for (row, column, id) in wells { layout.add(id, at: WellPosition(row: row, column: column)) }
     return layout
@@ -561,7 +565,7 @@ do {
     guard FileManager.default.fileExists(atPath: configURL.path), store.lastSaveError == nil else {
         bail("config", "could not write \(configURL.path): \(store.lastSaveError ?? "?")")
     }
-    let missing = testLayout.readingOrder.compactMap { testLayout.presetID(at: $0) }.filter { PresetLibrary.preset(id: $0) == nil }
+    let missing = testLayout.readingOrder.compactMap { testLayout.presetID(at: $0) }.filter { !PaletteLayout.isPlaceable($0) }
     guard missing.isEmpty else { bail("config", "unknown preset ids \(missing)") }
 }
 
@@ -800,9 +804,11 @@ do {
           "palette \(describe(bounds)), expected top \(menuBarBottom), left \(expectedX)", note: describe(bounds))
     check("1 header", state.header == targetHeader, "header \(state.header ?? "nil")", note: state.header ?? "")
     let presetIDs = testLayout.readingOrder.compactMap { testLayout.presetID(at: $0) }
-    let disabled = presetIDs.filter { state.enabled("preset:\($0)") != true }
+    let disabled = presetIDs.filter { $0 != PaletteLayout.revertID && state.enabled("preset:\($0)") != true }
     check("1 presets enabled with a target", disabled.isEmpty && state.elements["settings"] != nil,
           "disabled: \(disabled), settings row \(state.elements["settings"] != nil)")
+    check("1 Revert well dimmed before any move", state.enabled("preset:revert") == false,
+          "revert well \(state.enabled("preset:revert").map(String.init(describing:)) ?? "missing")")
     focusChecks("1 palette open")
     checkHighlight("1 palette open:", on: true)
 
@@ -1102,8 +1108,8 @@ do {
     guard frontmostPID() == helperPID else { bail("3 setup", "helper not frontmost") }
     _ = clickStatusItem()
     if let state = readPalette() {
-        check("3 Revert shown after a move", state.enabled("revert") == true, "no enabled revert item")
-        if state.elements["revert"] != nil, clickItem(state, "revert") {
+        check("3 Revert well enabled after a move", state.enabled("preset:revert") == true, "no enabled revert well")
+        if state.elements["preset:revert"] != nil, clickItem(state, "preset:revert") {
             let closed = paletteClosed()
             let restored = waitFor(1) { edgeError(frameOf("TW1"), start1) <= 1 }
             check("3 Revert restores TW1", closed != nil && restored != nil,

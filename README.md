@@ -79,6 +79,9 @@ The Palette pane has 11 × 6 wells:
 - Drag a well onto another well to move it. Dropping it on an occupied well swaps the two.
 - Drag a well anywhere outside the wells (onto the library, or out of the window) to remove it.
   Right-click › Remove works too.
+- Revert (under "Other" in the library) is a well item like any preset: one tile, dimmed until
+  there is a move to undo. New and updated configs get it left of the palette's top row once;
+  drag it out to remove it for good.
 - The palette is the bounding box of the occupied wells (shown in white in light mode, a
   lighter gray in dark mode). Empty wells inside that box become blank space.
 
@@ -110,4 +113,4 @@ Tiler --render-editor out/editor.png [--dark]   # settings window, headless, 2×
 The render flags draw headless 2× PNGs and exit. For `--render-palette`: `--highlight <n>`
 shows the n-th preset (row by row, from 0) selected; `--header` sets the target line (default
 "TilerTestWindows — TW1"); `--no-target` renders the "No window" state with single-window
-presets dimmed; `--revert` shows the Revert tile.
+presets dimmed; `--revert` renders with move history (a Revert well enabled, not dimmed).

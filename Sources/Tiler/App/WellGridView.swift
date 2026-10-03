@@ -3,7 +3,7 @@ import SwiftUI
 import TilerCore
 
 extension NSPasteboard.PasteboardType {
-    /// A preset dragged from the library; the string is the preset id.
+    /// An item dragged from the library; the string is the preset id or `PaletteLayout.revertID`.
     static let tilerPreset = NSPasteboard.PasteboardType("dev.ninja.tiler.preset-id")
     /// A preset dragged out of a well; the string is the preset id.
     static let tilerWell = NSPasteboard.PasteboardType("dev.ninja.tiler.well")
@@ -35,8 +35,9 @@ enum Well {
         case shown
     }
 
-    /// Draws a well into a y-down context. `iconAlpha` < 1 fades the icon (a well being dragged).
-    static func draw(in context: CGContext, rect: CGRect, style: Style, preset: Preset?,
+    /// Draws a well holding `id` (a preset id, `PaletteLayout.revertID`, or nil = empty) into a
+    /// y-down context. `iconAlpha` < 1 fades the icon (a well being dragged).
+    static func draw(in context: CGContext, rect: CGRect, style: Style, id: String?,
                      theme: EditorTheme, iconAlpha: CGFloat = 1) {
         let fill = style == .shown ? theme.wellShownFill : theme.wellEmptyFill
         let border = style == .shown ? theme.wellShownBorder : theme.wellEmptyBorder
@@ -49,18 +50,21 @@ enum Well {
         context.setStrokeColor(border.cgColor)
         context.setLineWidth(1)
         context.strokePath()
-        if let preset {
+        guard let id else { return }
+        let ink = PresetIcon.color(.normal, appearance: PresetIcon.appearance(dark: theme.isDark))
+        let color = ink.copy(alpha: ink.alpha * iconAlpha) ?? ink
+        if id == PaletteLayout.revertID {
+            PresetIcon.drawRevert(in: rect, iconHeight: iconSize.height, color: color, in: context)
+        } else if let preset = PresetLibrary.preset(id: id) {
             // Centered, snapped to the 2× pixel grid.
             let origin = CGPoint(x: rect.minX + ((rect.width - iconSize.width)).rounded() / 2,
                                  y: rect.minY + ((rect.height - iconSize.height)).rounded() / 2)
-            let ink = PresetIcon.color(.normal, appearance: PresetIcon.appearance(dark: theme.isDark))
-            PresetIcon.draw(preset, size: iconSize, at: origin,
-                            color: ink.copy(alpha: ink.alpha * iconAlpha) ?? ink, in: context)
+            PresetIcon.draw(preset, size: iconSize, at: origin, color: color, in: context)
         }
     }
 
-    /// A 2× image of an occupied well, used as the drag image.
-    static func image(for preset: Preset, dark: Bool) -> NSImage {
+    /// A 2× image of a well holding `id`, used as the drag image.
+    static func image(for id: String, dark: Bool) -> NSImage {
         let scale: CGFloat = 2
         let pixels = Int(size * scale)
         guard let rep = NSBitmapImageRep(
@@ -75,7 +79,7 @@ enum Well {
         context.translateBy(x: 0, y: size * scale)
         context.scaleBy(x: scale, y: -scale)
         draw(in: context, rect: CGRect(x: 0, y: 0, width: size, height: size), style: .shown,
-             preset: preset, theme: EditorTheme(dark: dark))
+             id: id, theme: EditorTheme(dark: dark))
         context.flush()
         let image = NSImage(size: rep.size)
         image.addRepresentation(rep)
@@ -94,8 +98,7 @@ enum WellDrop {
     }
 
     /// The layout after dropping `source` onto the well `target`, or nil when the drop is
-    /// refused (unknown preset id; a library preset that is not placed yet onto an occupied
-    /// well).
+    /// refused (unknown id; a library item that is not placed yet onto an occupied well).
     ///
     /// - library → empty well: adds. A library preset that already sits in a well moves there
     ///   instead, swapping with an occupied target.
@@ -106,7 +109,7 @@ enum WellDrop {
         case .well(let from):
             guard next.move(from: from, to: target) else { return nil }
         case .library(let id):
-            guard PresetLibrary.preset(id: id) != nil else { return nil }
+            guard PaletteLayout.isPlaceable(id) else { return nil }
             if let placed = next.position(of: id) {
                 next.move(from: placed, to: target)
             } else if !next.add(id, at: target) {
@@ -225,7 +228,7 @@ final class WellGridView: NSView, NSDraggingSource, NSViewToolTipOwner {
                 // The well a drag started from, while the drop would leave everything in place.
                 let lifted = position == draggedFrom && pendingLayout?.presetID(at: position) == draggedID
                 Well.draw(in: context, rect: wellRect, style: inBox ? .shown : .empty,
-                          preset: id.flatMap(PresetLibrary.preset(id:)), theme: theme,
+                          id: id, theme: theme,
                           iconAlpha: lifted ? 0.3 : 1)
                 if position == dropTarget {
                     let ring = CGPath(roundedRect: wellRect.insetBy(dx: 1, dy: 1),
@@ -254,7 +257,7 @@ final class WellGridView: NSView, NSDraggingSource, NSViewToolTipOwner {
               userData data: UnsafeMutableRawPointer?) -> String {
         position(at: point, strict: true)
             .flatMap { layout.presetID(at: $0) }
-            .flatMap(PresetLibrary.preset(id:))?.name ?? ""
+            .flatMap(PaletteLayout.name(of:)) ?? ""
     }
 
     override func resetCursorRects() {
@@ -295,7 +298,7 @@ final class WellGridView: NSView, NSDraggingSource, NSViewToolTipOwner {
         for (position, element) in accessibilityWells {
             let id = layout.presetID(at: position)
             element.setAccessibilityValue(id ?? "")
-            element.setAccessibilityLabel(id.flatMap(PresetLibrary.preset(id:))?.name ?? "Empty well")
+            element.setAccessibilityLabel(id.flatMap(PaletteLayout.name(of:)) ?? "Empty well")
         }
     }
 
@@ -339,7 +342,7 @@ final class WellGridView: NSView, NSDraggingSource, NSViewToolTipOwner {
     override func mouseDragged(with event: NSEvent) {
         guard let start = mouseDownPoint, draggedFrom == nil,
               let source = position(at: start, strict: true),
-              let id = layout.presetID(at: source), let preset = PresetLibrary.preset(id: id)
+              let id = layout.presetID(at: source)
         else { return }
         let point = convert(event.locationInWindow, from: nil)
         guard hypot(point.x - start.x, point.y - start.y) >= 3 else { return }
@@ -348,7 +351,7 @@ final class WellGridView: NSView, NSDraggingSource, NSViewToolTipOwner {
         let pasteboardItem = NSPasteboardItem()
         pasteboardItem.setString(id, forType: .tilerWell)
         let item = NSDraggingItem(pasteboardWriter: pasteboardItem)
-        item.setDraggingFrame(rect(of: source), contents: Well.image(for: preset, dark: theme.isDark))
+        item.setDraggingFrame(rect(of: source), contents: Well.image(for: id, dark: theme.isDark))
         draggedFrom = source
         draggedID = id
         dropAccepted = false
@@ -494,7 +497,7 @@ struct LibraryDragSource: NSViewRepresentable {
     }
 }
 
-/// Accessibility: a button `library:<preset id>` labelled with the preset's name (live tests
+/// Accessibility: a button `library:<id>` labelled with the item's name (live tests
 /// find the row's screen frame by it).
 final class LibraryDragSourceView: NSView, NSDraggingSource {
     var presetID: String {
@@ -512,7 +515,7 @@ final class LibraryDragSourceView: NSView, NSDraggingSource {
 
     private func updateAccessibility() {
         setAccessibilityIdentifier("library:\(presetID)")
-        setAccessibilityLabel(PresetLibrary.preset(id: presetID)?.name ?? presetID)
+        setAccessibilityLabel(PaletteLayout.name(of: presetID) ?? presetID)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
@@ -532,7 +535,7 @@ final class LibraryDragSourceView: NSView, NSDraggingSource {
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let start = mouseDownPoint, let preset = PresetLibrary.preset(id: presetID) else { return }
+        guard let start = mouseDownPoint, PaletteLayout.isPlaceable(presetID) else { return }
         let point = convert(event.locationInWindow, from: nil)
         guard hypot(point.x - start.x, point.y - start.y) >= 3 else { return }
         mouseDownPoint = nil
@@ -543,7 +546,7 @@ final class LibraryDragSourceView: NSView, NSDraggingSource {
         let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
         let frame = CGRect(x: point.x - Well.size / 2, y: point.y - Well.size / 2,
                            width: Well.size, height: Well.size)
-        item.setDraggingFrame(frame, contents: Well.image(for: preset, dark: dark))
+        item.setDraggingFrame(frame, contents: Well.image(for: presetID, dark: dark))
         beginDraggingSession(with: [item], event: event, source: self)
     }
 

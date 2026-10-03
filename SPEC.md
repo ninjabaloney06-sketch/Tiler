@@ -135,9 +135,14 @@ palette (⌘ held at hover = macOS menu), with an option to invert; launch at lo
 ## 2. Palette editor model (Moom-style spatial wells)
 
 - 11 columns × 6 rows of wells. Each preset occupies at most one well.
-- Default placement (rows/cols 0-based): row 2, cols 3–7 = Fill, Left half, Right half, Top half,
-  Bottom half. Row 3, cols 3–7 = `3x2`, `3x3`, `4x3`, `4x4`, `1+3`. All other presets start in the
-  library only.
+- **Revert is a well item (ninja, 3 Oct 2026)**, reserved id `"revert"`: placed, moved and
+  removed like a preset (at most one well), one tile in size; there is no fixed Revert element
+  any more. Default placement and migration: config files without `"paletteRevision": 2` (saved
+  before this change) get Revert once in the well left of the palette's top-left well (else the
+  first empty well); every save writes revision 2, so a Revert the user drags out stays removed.
+- Default placement (rows/cols 0-based): row 2, col 2 = Revert; row 2, cols 3–7 = Fill, Left
+  half, Right half, Top half, Bottom half. Row 3, cols 3–7 = `3x2`, `3x3`, `4x3`, `4x4`, `1+3`.
+  All other presets start in the library only.
 - The live palette = bounding box of occupied wells; empty wells inside the box render as blank
   space (see `docs/reference/blanks.png`).
 - Persistence: `~/Library/Application Support/Tiler/config.json` (settings + well placements),
@@ -165,9 +170,9 @@ read per move): tiler-harness sets it for its in-process engine; tiler-palettete
 tiler-hovertest pass it to the spawned Tiler.
 
 **Revert:** remember each moved window's previous frame (keyed by CGWindowID via
-`@_silgen_name("_AXUIElementGetWindow")`, fallback pid+frame); a Revert icon appears at the
-palette's far left when the hovered window (or the last arrange) has history; clicking it
-restores the previous frames.
+`@_silgen_name("_AXUIElementGetWindow")`, fallback pid+frame); a Revert well (§2) is enabled
+when the target window (or the last arrange) has history, dimmed and inert otherwise; clicking
+it restores the previous frames.
 
 ## 4. Triggers and palette (the core UX)
 
@@ -180,6 +185,10 @@ app's focused window via AX, before anything can change focus), then show the pa
 dropdown directly under the status item (menu-like, aligned to the icon, clamped on screen).
 Right-click or ⌃-click on the status item → the classic menu (§5). The palette's footer has a
 "Tiler Settings…" row (like the native menu's "Full Screen" row) that opens Settings.
+Menu-like persistence (ninja, 3 Oct 2026): the palette and the status item's pill stay up until
+the user dismisses them (click outside, Esc, icon again, apply, target closed). Another app
+becoming active dismisses only when the user caused it (a key press or click within 1 s before
+the activation, e.g. ⌘-Tab); a background app activating itself does not.
 
 **4.B Hotkey trigger.** Global hotkey via Carbon `RegisterEventHotKey` (no permission needed),
 default ⌃⌥T, recordable in Settings (validate, show conflicts as an error, allow clearing).
@@ -265,7 +274,8 @@ proven `AXShowMenu` probe in `tools/probes/ctl.swift`, then `screencapture -l <w
   "Pause Tiler" toggle, "Quit".
 - Settings window (SwiftUI in NSHostingController, single window, sidebar like
   `full_panel.jpg`): left = **Library** list of all presets (icon + name) grouped
-  "Move & Resize" / "Arrange"; right = **Palette** pane with the 11×6 wells (look:
+  "Move & Resize" / "Arrange", plus "Other" › Revert (§2, variant-independent); right =
+  **Palette** pane with the 11×6 wells (look:
   `half_top.jpg`), and below it: Delay slider (with value label), Size slider, "Stage Manager
   inset" (pt, for `-sm` presets), "Palette hotkey" recorder (default ⌃⌥T), "Also show palette
   when hovering the green button (beta)" (off by default) with, indented and only enabled when

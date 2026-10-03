@@ -188,7 +188,7 @@ do {
     try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
     let store = ConfigStore(fileURL: configURL)
     var config = TilerConfig.default
-    // `TilerConfig.default`'s own `palette` is already `PaletteLayout.default` — the default
+    // `TilerConfig.default`'s own `palette` is already `PaletteLayout.defaultWithRevert` — the default
     // placement (SPEC §2), not a minimal test-only layout. Check 5's ghost-hat regression check
     // was reproduced against the default palette (ninja/critic repro), not a stripped-down one,
     // so this leaves it that way rather than overriding it.

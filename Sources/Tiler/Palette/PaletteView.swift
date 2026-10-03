@@ -3,10 +3,8 @@ import TilerCore
 
 /// One thing in the palette that can be selected and activated.
 nonisolated enum PaletteItem: Hashable, Sendable {
-    /// The preset in this well (absolute editor position, SPEC §2).
+    /// The item in this well (absolute editor position, SPEC §2): a preset or Revert.
     case preset(WellPosition)
-    /// Revert the last move (SPEC §3), shown at the far left when there is history.
-    case revert
     /// The footer row "Tiler Settings…" (SPEC §4.A).
     case settings
 }
@@ -21,11 +19,18 @@ struct PaletteContent {
     var header: String
     /// False = no target window: single-window presets are dimmed and inert (SPEC §4).
     var hasTarget: Bool
-    var showsRevert: Bool
+    /// False = nothing to revert: a Revert well is dimmed and inert (SPEC §3).
+    var hasHistory: Bool
 
     /// Single-window presets need a target; arrange presets always work.
     func isEnabled(_ preset: Preset) -> Bool {
         hasTarget || preset.kind == .arrange
+    }
+
+    /// Whether the well item `id` (a preset id or `PaletteLayout.revertID`) can be activated.
+    func isEnabled(id: String) -> Bool {
+        if id == PaletteLayout.revertID { return hasHistory }
+        return PresetLibrary.preset(id: id).map(isEnabled) ?? false
     }
 
     /// The layout without disabled presets: keyboard navigation (`PaletteLayout.neighbor`)
@@ -33,8 +38,7 @@ struct PaletteContent {
     var enabledLayout: PaletteLayout {
         var enabled = layout
         for position in layout.readingOrder {
-            guard let id = layout.presetID(at: position), let preset = PresetLibrary.preset(id: id),
-                  !isEnabled(preset) else { continue }
+            guard let id = layout.presetID(at: position), !isEnabled(id: id) else { continue }
             enabled.remove(at: position)
         }
         return enabled
@@ -48,8 +52,8 @@ struct PaletteContent {
 ///
 ///     ┌──────────────────────────────────┐  header: 11u semibold, tertiary label color,
 ///     │  App — Window title              │          baseline 23.5u, left at the tile edge
-///     │  [↶] [tile] [tile]  blank [tile] │  tiles:  first row at 33u, 16u side insets,
-///     │      [tile] [tile] [tile] [tile] │          Revert in its own column at the far left
+///     │  [↶]  [tile] [tile] blank [tile] │  tiles:  first row at 33u, 16u side insets;
+///     │  blank [tile] [tile] [tile] [tile] │        Revert (↶) is a well item like a preset
 ///     │  ────────────────────────────────│  separator: 9u below the tiles, 1u thick
 ///     │  ⚙  Tiler Settings…             │  footer: 13u regular, baseline 23.5u below the
 ///     └──────────────────────────────────┘          separator, panel ends 35u below it
@@ -64,7 +68,6 @@ struct PaletteGeometry {
     let headerRect: CGRect
     /// Top-left of the well grid.
     let gridOrigin: CGPoint
-    let revertRect: CGRect?
     let separatorRect: CGRect
     /// The footer row's hit and highlight rect.
     let footerRect: CGRect
@@ -88,8 +91,7 @@ struct PaletteGeometry {
         let tile = metrics.tile, gap = metrics.tileGap
         let gridWidth = columns > 0 ? CGFloat(columns) * tile.width + CGFloat(columns - 1) * gap : 0
         let gridHeight = rows > 0 ? CGFloat(rows) * tile.height + CGFloat(rows - 1) * gap : 0
-        let revertWidth = content.showsRevert ? tile.width + (columns > 0 ? gap : 0) : 0
-        let tilesWidth = revertWidth + gridWidth
+        let tilesWidth = gridWidth
 
         // Left margin shared by the header, separator and footer row — measured on the native
         // menu at 16u (SPEC 10.1; ink lands ≈1u further in from font side-bearing).
@@ -114,12 +116,8 @@ struct PaletteGeometry {
         // Tiles.
         let gridTop = snap(33 * u)
         let tilesX = panelPad + snap((contentWidth - tilesWidth) / 2)
-        gridOrigin = CGPoint(x: tilesX + revertWidth, y: gridTop)
-        revertRect = content.showsRevert
-            ? CGRect(x: tilesX, y: gridTop + snap(max(gridHeight - tile.height, 0) / 2),
-                     width: tile.width, height: tile.height)
-            : nil
-        let tilesBottom = gridTop + max(gridHeight, content.showsRevert ? tile.height : 0)
+        gridOrigin = CGPoint(x: tilesX, y: gridTop)
+        let tilesBottom = gridTop + gridHeight
 
         // Separator and footer row: the separator spans the panel's own 16u side margins (1u /
         // 2 px thick at size 1.0 — the native menu's line, not a 0.5 px hairline).
@@ -149,22 +147,21 @@ struct PaletteGeometry {
     func rect(for item: PaletteItem) -> CGRect? {
         switch item {
         case .preset(let position): return tileRect(position)
-        case .revert: return revertRect
         case .settings: return footerRect
         }
     }
 }
 
 /// The live palette's content (inside `GlassContainerView`): header, preset tiles drawn with
-/// the shared `PresetIcon` renderer, the Revert tile, and the "Tiler Settings…" footer row.
+/// the shared `PresetIcon` renderer (Revert wells included), and the "Tiler Settings…" footer row.
 ///
 /// Mouse: hovering selects (accent highlight, white icon, `PaletteToolTip` with the preset
 /// name), a click activates. Keyboard (when the panel is key): ←→↑↓ move the selection across enabled
-/// presets, skipping blanks and dimmed presets (`PaletteLayout.neighbor`; ← past the first
-/// column reaches Revert, ↓ past the last row the footer), Return activates, 1–9 activate the
-/// n-th preset in reading order, Esc cancels. Disabled presets never highlight or activate.
-/// Each item is an accessibility button (identifiers `preset:<id>`, `revert`, `settings`), the
-/// header static text `palette-header`.
+/// items, skipping blanks and dimmed items (`PaletteLayout.neighbor`; ↓ past the last row
+/// reaches the footer), Return activates, 1–9 activate the n-th well in reading order, Esc
+/// cancels. Disabled items never highlight or activate. Each item is an accessibility button
+/// (identifiers `preset:<id>` — `preset:revert` for a Revert well — and `settings`), the header
+/// static text `palette-header`.
 final class PaletteView: NSView {
     private(set) var content: PaletteContent
     private(set) var geometry: PaletteGeometry
@@ -226,15 +223,14 @@ final class PaletteView: NSView {
 
     func isEnabled(_ item: PaletteItem) -> Bool {
         switch item {
-        case .preset(let position): return preset(at: position).map(content.isEnabled) ?? false
-        case .revert: return content.showsRevert
+        case .preset(let position): return content.layout.presetID(at: position).map(content.isEnabled(id:)) ?? false
         case .settings: return true
         }
     }
 
-    /// Every item, in reading order: Revert, the presets, the footer.
+    /// Every item, in reading order: the wells, the footer.
     private var items: [PaletteItem] {
-        (content.showsRevert ? [.revert] : []) + content.layout.readingOrder.map { .preset($0) } + [.settings]
+        content.layout.readingOrder.map { .preset($0) } + [.settings]
     }
 
     private func item(at point: CGPoint) -> PaletteItem? {
@@ -255,25 +251,19 @@ final class PaletteView: NSView {
             attributes: [.font: geometry.headerFont, .foregroundColor: NSColor.tertiaryLabelColor,
                          .paragraphStyle: paragraph])
 
-        // Presets.
+        // Wells: presets and Revert.
         for position in content.layout.readingOrder {
-            guard let preset = preset(at: position), let rect = geometry.tileRect(position),
+            guard let id = content.layout.presetID(at: position), let rect = geometry.tileRect(position),
                   rect.intersects(dirtyRect) else { continue }
-            let ink: PresetIcon.Ink = !content.isEnabled(preset) ? .dimmed
+            let ink: PresetIcon.Ink = !content.isEnabled(id: id) ? .dimmed
                 : selection == .preset(position) ? .highlighted : .normal
-            PresetIcon.drawTile(preset, in: rect, metrics: geometry.metrics, ink: ink,
-                                appearance: appearance, in: context)
-        }
-
-        // Revert.
-        if let rect = geometry.revertRect {
-            let selected = selection == .revert
-            if selected {
-                PresetIcon.fillHighlight(rect, radius: geometry.metrics.highlightRadius,
-                                         appearance: effectiveAppearance, in: context)
+            if id == PaletteLayout.revertID {
+                PresetIcon.drawRevertTile(in: rect, metrics: geometry.metrics, ink: ink,
+                                          appearance: appearance, in: context)
+            } else if let preset = PresetLibrary.preset(id: id) {
+                PresetIcon.drawTile(preset, in: rect, metrics: geometry.metrics, ink: ink,
+                                    appearance: appearance, in: context)
             }
-            drawSymbol("arrow.uturn.backward", pointSize: geometry.metrics.icon.height * 0.9, weight: .semibold,
-                       color: selected ? .white : .labelColor, center: CGPoint(x: rect.midX, y: rect.midY))
         }
 
         // Separator.
@@ -331,12 +321,11 @@ final class PaletteView: NSView {
         presetToolTip.hover(hovered.flatMap(toolTipText(for:)))
     }
 
-    /// The tooltip of an item: the preset's name (dimmed presets too), "Revert"; none for the
+    /// The tooltip of an item: the preset's name or "Revert" (dimmed items too); none for the
     /// footer row, which has its title.
     private func toolTipText(for item: PaletteItem) -> String? {
         switch item {
-        case .preset(let position): return preset(at: position)?.name
-        case .revert: return "Revert"
+        case .preset(let position): return content.layout.presetID(at: position).flatMap(PaletteLayout.name(of:))
         case .settings: return nil
         }
     }
@@ -402,7 +391,7 @@ final class PaletteView: NSView {
         let order = enabled.readingOrder
         guard let selection else {
             // Like a menu opened from the keyboard: the first arrow selects the first item.
-            self.selection = order.first.map { .preset($0) } ?? (content.showsRevert ? .revert : .settings)
+            self.selection = order.first.map { .preset($0) } ?? .settings
             return
         }
         let bottomRow = (content.layout.boundingBox?.maxRow ?? 0) + 1
@@ -410,27 +399,13 @@ final class PaletteView: NSView {
         case .preset(let position):
             if let next = enabled.neighbor(of: position, direction: direction) {
                 self.selection = .preset(next)
-            } else if direction == .left, content.showsRevert {
-                self.selection = .revert
             } else if direction == .down {
                 self.selection = .settings
-            }
-        case .revert:
-            let topRow = order.first?.row ?? 0
-            switch direction {
-            case .right:
-                if let first = order.first(where: { $0.row == topRow }) { self.selection = .preset(first) }
-            case .down:
-                self.selection = .settings
-            case .left, .up:
-                break
             }
         case .settings:
             guard direction == .up else { return }
             if let above = enabled.neighbor(of: WellPosition(row: bottomRow, column: lastColumn), direction: .up) {
                 self.selection = .preset(above)
-            } else if content.showsRevert {
-                self.selection = .revert
             }
         }
     }
@@ -445,12 +420,9 @@ final class PaletteView: NSView {
             let identifier: String
             switch item {
             case .preset(let position):
-                guard let preset = preset(at: position) else { continue }
-                label = preset.name
-                identifier = "preset:\(preset.id)"
-            case .revert:
-                label = "Revert"
-                identifier = "revert"
+                guard let id = content.layout.presetID(at: position), let name = PaletteLayout.name(of: id) else { continue }
+                label = name
+                identifier = "preset:\(id)"
             case .settings:
                 label = PaletteGeometry.footerTitle
                 identifier = "settings"

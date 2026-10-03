@@ -77,6 +77,35 @@ nonisolated enum PresetIcon {
         context.fillPath()
     }
 
+    // MARK: Revert
+
+    /// The Revert well item's icon (SPEC §3): the ↩ symbol in `color`, centered in `rect` on the
+    /// half-point grid, sized to the preset icons' height `iconHeight`. The one Revert renderer —
+    /// the palette tile, the editor wells and the drag image all call this. `context` is y-down.
+    static func drawRevert(in rect: CGRect, iconHeight: CGFloat, color: CGColor, in context: CGContext) {
+        let configuration = NSImage.SymbolConfiguration(pointSize: iconHeight * 0.9, weight: .semibold)
+            .applying(NSImage.SymbolConfiguration(paletteColors: [NSColor(cgColor: color) ?? .labelColor]))
+        guard let image = NSImage(systemSymbolName: "arrow.uturn.backward", accessibilityDescription: "Revert")?
+            .withSymbolConfiguration(configuration) else { return }
+        let size = image.size
+        let origin = CGPoint(x: ((rect.midX - size.width / 2) * 2).rounded() / 2,
+                             y: ((rect.midY - size.height / 2) * 2).rounded() / 2)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
+        image.draw(in: CGRect(origin: origin, size: size), from: .zero, operation: .sourceOver,
+                   fraction: 1, respectFlipped: true, hints: nil)
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    /// One Revert palette tile: the selection highlight for `.highlighted`, then the symbol.
+    static func drawRevertTile(in tile: CGRect, metrics: PaletteMetrics, ink: Ink,
+                               appearance: NSAppearance, in context: CGContext) {
+        if ink == .highlighted {
+            fillHighlight(tile, radius: metrics.highlightRadius, appearance: appearance, in: context)
+        }
+        drawRevert(in: tile, iconHeight: metrics.icon.height, color: color(ink, appearance: appearance), in: context)
+    }
+
     // MARK: Paths
 
     /// The outline to stroke with `geometry.strokeWidth`.

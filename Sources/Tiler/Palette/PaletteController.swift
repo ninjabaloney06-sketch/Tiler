@@ -13,7 +13,7 @@ import TilerCore
 /// centered on the target (hotkey; the panel becomes key so the keyboard works). A preset is
 /// applied through `AXWindowEngine.apply` (target optional), then the palette fades out.
 /// Dismissal: a click outside, Esc, the trigger again, applying a preset, the target window
-/// closing, or another app becoming active.
+/// closing, or the user activating another app.
 ///
 /// Idle cost: nothing runs while the palette is closed — the Carbon hotkey and two notification
 /// observers only; event monitors and the target watcher exist only while it is open.
@@ -208,9 +208,9 @@ final class PaletteController {
 
         let engine = AXWindowEngine.shared
         let config = store.config
-        let showsRevert = engine.hasArrangeHistory || (target.window.map(engine.hasHistory) ?? false)
+        let hasHistory = engine.hasArrangeHistory || (target.window.map(engine.hasHistory) ?? false)
         let content = PaletteContent(layout: config.palette, paletteSize: config.settings.paletteSize,
-                                     header: target.header, hasTarget: target.hasWindow, showsRevert: showsRevert)
+                                     header: target.header, hasTarget: target.hasWindow, hasHistory: hasHistory)
         let view: PaletteView
         if let existing = paletteView {
             existing.update(content)
@@ -431,17 +431,32 @@ final class PaletteController {
         button.window.map { $0.convertToScreen(button.convert(button.bounds, to: nil)) }
     }
 
-    /// Another app became active (⌘-Tab, Dock, a click that activates): the palette closes.
+    /// Another app became active because of the user (⌘-Tab, Dock, a click that activates): the
+    /// palette closes. An activation with no key press or click just before it — a background app
+    /// activating itself (measured live: Claude, an Electron app, did this ~2–3 s after the
+    /// palette opened, with no input) — is ignored, so the palette and the status item's pill stay
+    /// up until the user actually does something, like a native status menu.
     private func observeActivation() -> NSObjectProtocol {
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
         ) { [weak self] note in
             let pid = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.processIdentifier
             MainActor.assumeIsolated {
-                guard let self, let session = self.session, pid != session.frontmostPID else { return }
+                guard let self, let session = self.session, pid != session.frontmostPID,
+                      Self.secondsSinceUserInput() < Self.userActivationWindow else { return }
                 self.dismiss(animated: true)
             }
         }
+    }
+
+    /// How recent a key press or click must be for an activation to count as the user's.
+    private static let userActivationWindow: TimeInterval = 1
+
+    /// Seconds since the last key press or mouse click in this login session (no permission
+    /// needed; includes posted events, so the live test tools' synthetic input counts too).
+    private static func secondsSinceUserInput() -> TimeInterval {
+        let types: [CGEventType] = [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]
+        return types.map { CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: $0) }.min() ?? .infinity
     }
 
     // MARK: Actions
@@ -449,11 +464,12 @@ final class PaletteController {
     private func activate(_ item: PaletteItem) {
         switch item {
         case .preset(let position):
-            guard let id = store?.config.palette.presetID(at: position),
-                  let preset = PresetLibrary.preset(id: id) else { return }
-            apply(preset)
-        case .revert:
-            revert()
+            guard let id = store?.config.palette.presetID(at: position) else { return }
+            if id == PaletteLayout.revertID {
+                revert()
+            } else if let preset = PresetLibrary.preset(id: id) {
+                apply(preset)
+            }
         case .settings:
             // Critic gap, reproduced live 3/3 runs (mouse AND keyboard): opening the hotkey
             // palette (§4.B, panel key but Tiler not active) and picking "Tiler Settings…" left

@@ -24,6 +24,23 @@ struct PaletteLayoutTests {
         #expect(layout.paletteGrid == [row2, row3])
     }
 
+    @Test("Revert is a placeable well item; migration falls back to the first empty well")
+    func revertItem() throws {
+        #expect(PaletteLayout.isPlaceable(PaletteLayout.revertID))
+        #expect(!PaletteLayout.isPlaceable("nope"))
+        #expect(PaletteLayout.name(of: PaletteLayout.revertID) == "Revert")
+        var layout = PaletteLayout()
+        layout.placeRevertIfMissing()
+        #expect(layout.wells.isEmpty) // empty palette: nothing to sit next to
+        layout.add("fill", at: well(0, 0))
+        layout.placeRevertIfMissing()
+        #expect(layout.position(of: PaletteLayout.revertID) == well(0, 1))
+        layout.placeRevertIfMissing() // already placed: no-op
+        #expect(layout.wells.count == 2)
+        let data = try JSONEncoder().encode(layout)
+        #expect(try JSONDecoder().decode(PaletteLayout.self, from: data) == layout)
+    }
+
     @Test("Grid is 11 columns × 6 rows")
     func gridSize() {
         #expect(PaletteLayout.columns == 11)

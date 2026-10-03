@@ -85,7 +85,8 @@ enum WidthVariant: String, CaseIterable, Identifiable {
 }
 
 /// Every preset (icon + name) of the chosen width variant, grouped "Move & Resize" /
-/// "Arrange". Rows are drag sources; a check mark shows which presets already sit in a well.
+/// "Arrange", plus Revert under "Other" (variant-independent, shown in both views). Rows are
+/// drag sources; a check mark shows which items already sit in a well.
 private struct LibrarySidebar: View {
     let palette: PaletteLayout
 
@@ -110,6 +111,10 @@ private struct LibrarySidebar: View {
                 VStack(alignment: .leading, spacing: 10) {
                     section("Move & Resize", presets.moveResize)
                     section("Arrange", presets.arrange)
+                    VStack(alignment: .leading, spacing: 0) {
+                        sectionTitle("Other")
+                        RevertLibraryRow(placed: palette.position(of: PaletteLayout.revertID) != nil)
+                    }
                 }
                 .padding(.horizontal, 10)
                 .padding(.bottom, 12)
@@ -119,15 +124,19 @@ private struct LibrarySidebar: View {
 
     private func section(_ title: String, _ presets: [Preset]) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(title)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 8)
-                .frame(height: 22, alignment: .center)
+            sectionTitle(title)
             ForEach(presets) { preset in
                 LibraryRow(preset: preset, placed: palette.position(of: preset.id) != nil)
             }
         }
+    }
+
+    private func sectionTitle(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
+            .frame(height: 22, alignment: .center)
     }
 }
 
@@ -143,9 +152,37 @@ private struct LibraryRow: View {
     }
 
     var body: some View {
-        HStack(spacing: 9) {
+        LibraryRowLayout(id: preset.id, name: preset.name, title: shortName, placed: placed) {
             PresetIconView(preset: preset, size: Well.iconSize)
-            Text(shortName)
+        }
+    }
+}
+
+/// The library row of the Revert well item (SPEC §3), drawn with the palette's ↩ symbol.
+private struct RevertLibraryRow: View {
+    let placed: Bool
+
+    var body: some View {
+        LibraryRowLayout(id: PaletteLayout.revertID, name: "Revert", title: "Revert", placed: placed) {
+            Image(systemName: "arrow.uturn.backward")
+                .font(.system(size: Well.iconSize.height * 0.9, weight: .semibold))
+                .frame(width: Well.iconSize.width, height: Well.iconSize.height)
+        }
+    }
+}
+
+/// One draggable library row: icon, title, check mark when placed.
+private struct LibraryRowLayout<Icon: View>: View {
+    let id: String
+    let name: String
+    let title: String
+    let placed: Bool
+    @ViewBuilder let icon: Icon
+
+    var body: some View {
+        HStack(spacing: 9) {
+            icon
+            Text(title)
                 .font(.system(size: 13))
                 .lineLimit(1)
             Spacer(minLength: 4)
@@ -161,8 +198,8 @@ private struct LibraryRow: View {
         .contentShape(Rectangle())
         .overlay {
             LibraryDragSource(
-                presetID: preset.id,
-                toolTip: placed ? "\(preset.name) is in the palette" : "Drag into a well to add \(preset.name)")
+                presetID: id,
+                toolTip: placed ? "\(name) is in the palette" : "Drag into a well to add \(name)")
         }
     }
 }
@@ -177,7 +214,7 @@ private struct PalettePane: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Palette").font(.system(size: 15, weight: .semibold))
-                Text("Drag presets from the library into the wells. Drag out or right-click to remove.")
+                Text("Drag presets or Revert from the library into the wells. Drag out or right-click to remove.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }

@@ -125,6 +125,7 @@ struct ConfigStoreTests {
             #expect(store.loadResult == .loaded)
             #expect(store.config.palette.wells == [
                 WellPosition(row: 0, column: 0): "fill",
+                WellPosition(row: 0, column: 1): PaletteLayout.revertID, // pre-revision-2 migration
                 WellPosition(row: 5, column: 10): "arrange-4x4",
             ])
             let s = store.config.settings
@@ -246,6 +247,29 @@ struct ConfigStoreTests {
             """
             let store = try load(json, at: url)
             #expect(store.config.settings.paletteHotkey == .defaultPalette)
+        }
+    }
+
+    @Test("A palette saved before Revert became a well gets Revert once, left of its top-left well")
+    func revertMigration() throws {
+        try withConfigURL { url in
+            let store = try load(#"{"version": 1, "palette": [{"id": "fill", "row": 2, "column": 3}]}"#, at: url)
+            #expect(store.config.palette.presetID(at: WellPosition(row: 2, column: 2)) == PaletteLayout.revertID)
+            // Removing it is saved with the current revision, so it stays removed on reload.
+            store.config.palette.remove(presetID: PaletteLayout.revertID)
+            let saved = try String(contentsOf: url, encoding: .utf8)
+            #expect(saved.contains("\"paletteRevision\" : 2"))
+            #expect(ConfigStore(fileURL: url).config.palette.position(of: PaletteLayout.revertID) == nil)
+        }
+    }
+
+    @Test("Revert placed by the user round-trips; the default config has it left of the default rows")
+    func revertWellRoundTrip() throws {
+        try withConfigURL { url in
+            #expect(TilerConfig.default.palette.presetID(at: WellPosition(row: 2, column: 2)) == PaletteLayout.revertID)
+            let store = ConfigStore(fileURL: url)
+            store.config.palette.move(from: WellPosition(row: 2, column: 2), to: WellPosition(row: 5, column: 0))
+            #expect(ConfigStore(fileURL: url).config.palette.presetID(at: WellPosition(row: 5, column: 0)) == PaletteLayout.revertID)
         }
     }
 

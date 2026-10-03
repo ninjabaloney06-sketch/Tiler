@@ -20,10 +20,10 @@ enum DebugRender {
     }
 
     /// The live palette (`PaletteSnapshotView`: header, wells as configured with blanks as space,
-    /// Revert, the "Tiler Settings…" footer) in its glass panel with shadow, on the backdrop of the
+    /// the "Tiler Settings…" footer) in its glass panel with shadow, on the backdrop of the
     /// native reference captures (white / #212121). `header` names the target (default
     /// "TilerTestWindows — TW1"); `noTarget` renders the "No window" state with single-window
-    /// presets dimmed; `revert` shows the Revert tile; `highlight` selects the n-th preset
+    /// presets dimmed; `revert` renders with move history (a Revert well enabled, else dimmed); `highlight` selects the n-th preset
     /// (reading order, 0-based).
     static func palette(store: ConfigStore, dark: Bool, size: Double?, highlight: Int?, header: String?,
                         noTarget: Bool, revert: Bool, to url: URL) throws -> URL {
@@ -35,7 +35,7 @@ enum DebugRender {
         let content = PaletteContent(
             layout: layout, paletteSize: scale,
             header: noTarget ? PaletteTarget.noWindowHeader : header ?? "TilerTestWindows — TW1",
-            hasTarget: !noTarget, showsRevert: revert)
+            hasTarget: !noTarget, hasHistory: revert)
         let palette = PaletteSnapshotView(content: content)
         if let highlight {
             let order = layout.readingOrder

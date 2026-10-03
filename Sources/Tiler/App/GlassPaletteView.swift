@@ -144,7 +144,7 @@ final class PalettePreviewPanel: NSView {
     func update(_ content: PaletteContent) {
         guard content.layout != self.content.layout || content.paletteSize != self.content.paletteSize
             || content.header != self.content.header || content.hasTarget != self.content.hasTarget
-            || content.showsRevert != self.content.showsRevert
+            || content.hasHistory != self.content.hasHistory
         else { return }
         self.content = content
         paletteView.update(content)
@@ -200,11 +200,11 @@ struct PalettePreviewBox: View {
     let paletteSize: Double
     let box: CGSize
 
-    /// A representative target for the preview; no Revert — that needs move history, which the
-    /// editor itself has none of.
+    /// A representative target for the preview, with no move history (a Revert well shows
+    /// dimmed) — the editor itself has none.
     private var content: PaletteContent {
         PaletteContent(layout: layout, paletteSize: paletteSize, header: "Obsidian — Notes.md",
-                       hasTarget: true, showsRevert: false)
+                       hasTarget: true, hasHistory: false)
     }
 
     var body: some View {
